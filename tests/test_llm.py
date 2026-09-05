@@ -1,5 +1,6 @@
-from musicagent.llm import _Explanations, explain_set, parse_input
+import pytest
 
+from musicagent.llm import LLMOutputError, _Explanations, explain_set, parse_input
 from musicagent.models import SetPath, SetRequest, Track, TrackRef
 
 
@@ -12,6 +13,45 @@ class FakeLLM:
 
     def invoke(self, prompt):
         return self.result
+
+
+class RecordingLLM:
+    """Captures the rendered prompt passed to invoke()."""
+
+    def __init__(self, result):
+        self.result = result
+        self.prompts = []
+
+    def with_structured_output(self, schema):
+        return self
+
+    def invoke(self, prompt):
+        self.prompts.append(prompt)
+        return self.result
+
+
+class SequenceLLM:
+    """Returns/raises a different outcome on each successive invoke() call.
+
+    Each item in `outcomes` is either a value to return, or an Exception
+    instance/class to raise.
+    """
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def with_structured_output(self, schema):
+        return self
+
+    def invoke(self, prompt):
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception) or (
+            isinstance(outcome, type) and issubclass(outcome, Exception)
+        ):
+            raise outcome
+        return outcome
 
 
 def test_parse_input_returns_request():
@@ -103,11 +143,128 @@ def test_explain_set_preserves_unresolved():
     assert result.unresolved == unresolved_refs
 
 
-def test_parse_input_with_default_llm_not_called_at_import():
-    """Test that importing doesn't call get_llm() or fail with no API key."""
-    # This test just verifies the import succeeds
+def test_parse_input_lazy_llm_no_network_and_no_import_side_effect(monkeypatch):
+    """get_llm() must not be invoked at import time, and importing the module
+    (and referencing get_llm) must not raise even with no API key set. get_llm
+    itself must only be reached when a function is called without an explicit
+    llm= (never exercised here, to avoid any real network call)."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
     from musicagent import llm as llm_module
 
-    assert hasattr(llm_module, "get_llm")
-    assert hasattr(llm_module, "parse_input")
-    assert hasattr(llm_module, "explain_set")
+    # Referencing get_llm (not calling it) must not raise.
+    assert callable(llm_module.get_llm)
+
+    # Calling parse_input/explain_set with an explicit llm= must never reach
+    # get_llm() (and therefore never touch the network / API key).
+    def _boom():
+        raise AssertionError("get_llm() must not be called when llm= is provided")
+
+    monkeypatch.setattr(llm_module, "get_llm", _boom)
+
+    fake = FakeLLM(
+        SetRequest(tracks=[TrackRef(artist="a", title="b")], energy_shape="build")
+    )
+    result = llm_module.parse_input("x", llm=fake)
+    assert result.tracks[0].artist == "a"
+
+
+# --- Finding 1: repair-retry behavior ---
+
+
+def test_parse_input_retries_once_then_succeeds():
+    good = SetRequest(tracks=[TrackRef(artist="a", title="b")], energy_shape="build")
+    seq = SequenceLLM([RuntimeError("boom"), good])
+    result = parse_input("some text", llm=seq)
+    assert result is good
+    assert seq.calls == 2
+
+
+def test_parse_input_fails_both_times_raises_llm_output_error():
+    seq = SequenceLLM([RuntimeError("boom1"), RuntimeError("boom2")])
+    with pytest.raises(LLMOutputError):
+        parse_input("some text", llm=seq)
+    assert seq.calls == 2
+
+
+def test_parse_input_returns_none_raises_after_retry():
+    seq = SequenceLLM([None, None])
+    with pytest.raises(LLMOutputError):
+        parse_input("some text", llm=seq)
+    assert seq.calls == 2
+
+
+def test_parse_input_wrong_type_raises_after_retry():
+    seq = SequenceLLM(["not a SetRequest", "still wrong"])
+    with pytest.raises(LLMOutputError):
+        parse_input("some text", llm=seq)
+    assert seq.calls == 2
+
+
+def test_parse_input_empty_tracks_raises_llm_output_error():
+    empty = SetRequest(tracks=[], energy_shape="build")
+    fake = FakeLLM(empty)
+    with pytest.raises(LLMOutputError):
+        parse_input("gibberish", llm=fake)
+
+
+def test_explain_set_retries_once_then_succeeds():
+    tracks = [
+        Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A"),
+        Track(ref=TrackRef(artist="b", title="t2"), bpm=128, camelot="9A"),
+    ]
+    path = SetPath(tracks=tracks, edge_scores=[0.9])
+    good = _Explanations(explanations=["ok"], summary="nice")
+    seq = SequenceLLM([RuntimeError("boom"), good])
+    result = explain_set(path, unresolved=[], llm=seq)
+    assert result.summary == "nice"
+    assert seq.calls == 2
+
+
+def test_explain_set_explanations_none_is_coerced():
+    tracks = [
+        Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A"),
+        Track(ref=TrackRef(artist="b", title="t2"), bpm=128, camelot="9A"),
+    ]
+    path = SetPath(tracks=tracks, edge_scores=[0.9])
+    out = _Explanations.model_construct(explanations=None, summary="nice")
+    fake = FakeLLM(out)
+    result = explain_set(path, unresolved=[], llm=fake)
+    assert len(result.transitions) == 1
+    assert result.transitions[0].explanation == ""
+
+
+def test_explain_set_explanations_non_string_items_coerced():
+    tracks = [
+        Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A"),
+        Track(ref=TrackRef(artist="b", title="t2"), bpm=128, camelot="9A"),
+    ]
+    path = SetPath(tracks=tracks, edge_scores=[0.9])
+    out = _Explanations.model_construct(explanations=[123], summary="nice")
+    fake = FakeLLM(out)
+    result = explain_set(path, unresolved=[], llm=fake)
+    assert result.transitions[0].explanation == "123"
+
+
+# --- prompt construction coverage ---
+
+
+def test_explain_set_prompt_contains_track_fields():
+    tracks = [
+        Track(ref=TrackRef(artist="Bicep", title="Glue"), bpm=128.0, camelot="8A"),
+        Track(ref=TrackRef(artist="Four Tet", title="Baby"), bpm=126.0, camelot="9A"),
+    ]
+    path = SetPath(tracks=tracks, edge_scores=[0.9])
+    recorder = RecordingLLM(_Explanations(explanations=["smooth"], summary="nice"))
+    explain_set(path, unresolved=[], llm=recorder)
+
+    assert len(recorder.prompts) == 1
+    prompt = recorder.prompts[0]
+    for artist, title, camelot, bpm in [
+        ("Bicep", "Glue", "8A", "128"),
+        ("Four Tet", "Baby", "9A", "126"),
+    ]:
+        assert artist in prompt
+        assert title in prompt
+        assert camelot in prompt
+        assert bpm in prompt
