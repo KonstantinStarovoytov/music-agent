@@ -29,9 +29,41 @@ async def test_health_and_post_sets_stream():
         async with client.stream("POST", "/sets", json={"text": "a t1, b t2"}) as r:
             body = "".join([chunk async for chunk in r.aiter_text()])
     assert "event: progress" in body and "event: result" in body
-    final = [line for line in body.splitlines() if line.startswith("data: {")][-1]
-    payload = json.loads(final.removeprefix("data: "))
+    datas = [
+        json.loads(line.removeprefix("data: "))
+        for line in body.splitlines()
+        if line.startswith("data: {")
+    ]
+    progress, payload = datas[:-1], datas[-1]
     assert payload["result"]["summary"] == "ok" and payload["set_id"]
+
+    # Progress snapshots (spec section 5): one per node, in graph order, each
+    # carrying the client-safe projection the site renders live.
+    by_node = {p["node"]: p["data"] for p in progress}
+    assert [p["node"] for p in progress] == [
+        "parse_input",
+        "enrich_tracks",
+        "build_transition_graph",
+        "find_set_path",
+        "explain_set",
+    ]
+    assert by_node["parse_input"]["tracks"] == [
+        {"artist": "a", "title": "t1"},
+        {"artist": "b", "title": "t2"},
+    ]
+    enriched = by_node["enrich_tracks"]
+    assert enriched["unresolved"] == []
+    assert enriched["tracks"][0] == {
+        "artist": "a",
+        "title": "t1",
+        "bpm": 128.0,
+        "camelot": "8A",
+        "energy": 0.3,
+    }
+    edges = by_node["build_transition_graph"]["edges"]
+    assert edges and {"a", "b", "score"} == set(edges[0])
+    assert sorted(by_node["find_set_path"]["order"]) == [0, 1]
+    assert by_node["explain_set"] == {}
 
 
 @pytest.mark.asyncio

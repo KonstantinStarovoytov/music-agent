@@ -101,6 +101,48 @@ class SetIn(BaseModel):
     text: str = Field(..., max_length=MAX_TEXT_LENGTH)
 
 
+def _ref(ref) -> dict:
+    return {"artist": ref.artist, "title": ref.title}
+
+
+def progress_snapshot(node: str, state: dict) -> dict:
+    """Client-safe projection of what `node` just produced, for the live run
+    visualisation on the portfolio site (spec section 5). Only ever derived
+    from the accumulated graph state -- never prompts or provider payloads.
+    Indices in `edges`/`order` refer to the `enrich_tracks.tracks` list."""
+    if node == "parse_input":
+        req = state["request"]
+        return {
+            "tracks": [_ref(t) for t in req.tracks],
+            "energy_shape": req.energy_shape,
+            "duration_min": req.duration_min,
+        }
+    if node == "enrich_tracks":
+        return {
+            "tracks": [
+                {**_ref(t.ref), "bpm": t.bpm, "camelot": t.camelot, "energy": t.energy}
+                for t in state["tracks"]
+            ],
+            "unresolved": [
+                {"artist": u.artist, "title": u.title, "reason": u.reason}
+                for u in state["unresolved"]
+            ],
+        }
+    if node == "build_transition_graph":
+        return {
+            "edges": [
+                {"a": e.a, "b": e.b, "score": round(e.score, 3)}
+                for e in state["transition_graph"].edges
+            ]
+        }
+    if node == "find_set_path":
+        index = {(t.ref.artist, t.ref.title): i for i, t in enumerate(state["tracks"])}
+        return {
+            "order": [index[(t.ref.artist, t.ref.title)] for t in state["path"].tracks]
+        }
+    return {}
+
+
 def create_app(engine=None, llm=None) -> FastAPI:
     app = FastAPI(title="Set & Release Agent")
 
@@ -148,7 +190,15 @@ def create_app(engine=None, llm=None) -> FastAPI:
                         ):
                             node, out = next(iter(update.items()))
                             state.update(out)
-                            yield {"event": "progress", "data": node}
+                            yield {
+                                "event": "progress",
+                                "data": json.dumps(
+                                    {
+                                        "node": node,
+                                        "data": progress_snapshot(node, state),
+                                    }
+                                ),
+                            }
 
                     # Serializing the result and writing it to the DB is kept
                     # inside this same try so a KeyError (missing "result") or

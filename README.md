@@ -196,19 +196,19 @@ curl -N -X POST http://127.0.0.1:8123/sets \
 
 ```
 event: progress
-data: parse_input
+data: {"node": "parse_input", "data": {"tracks": [{"artist": "Tale Of Us", "title": "Nova Two"}, …], "energy_shape": "build", "duration_min": null}}
 
 event: progress
-data: enrich_tracks
+data: {"node": "enrich_tracks", "data": {"tracks": [{"artist": "Tale Of Us", "title": "Nova Two", "bpm": 122.0, "camelot": "10A", "energy": 0.41}, …], "unresolved": []}}
 
 event: progress
-data: build_transition_graph
+data: {"node": "build_transition_graph", "data": {"edges": [{"a": 0, "b": 1, "score": 0.92}, …]}}
 
 event: progress
-data: find_set_path
+data: {"node": "find_set_path", "data": {"order": [0, 1, 3, 2, 5, 4, 6]}}
 
 event: progress
-data: explain_set
+data: {"node": "explain_set", "data": {}}
 
 event: result
 data: {"set_id": "…", "result": {"transitions": [...], "summary": "...", "unresolved": [], "omitted": []}}
