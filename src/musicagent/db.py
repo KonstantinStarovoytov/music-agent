@@ -5,19 +5,22 @@ import uuid
 from sqlalchemy import JSON, Column, DateTime, Float, Integer, String, Table, MetaData, create_engine, func, select
 from sqlalchemy.engine import Engine
 
+from musicagent.models import SetResult, Track, TrackRef
+
 metadata = MetaData()
 
 tracks_table = Table(
     "tracks", metadata,
-    Column("key", String, primary_key=True),  # "artist|title" lowercased
+    Column("artist_key", String, primary_key=True),  # artist, stripped and lowercased
+    Column("title_key", String, primary_key=True),  # title, stripped and lowercased
     Column("artist", String, nullable=False),
     Column("title", String, nullable=False),
     Column("bpm", Float, nullable=False),
     Column("camelot", String, nullable=False),
     Column("energy", Float, nullable=False),
     Column("duration_s", Integer),
-    Column("tags", JSON, default=list),
-    Column("source", String, default="unknown"),
+    Column("tags", JSON),
+    Column("source", String),
     Column("fetched_at", DateTime, server_default=func.now()),
 )
 
@@ -38,18 +41,33 @@ def init_db(engine: Engine) -> None:
     metadata.create_all(engine)
 
 
-def _key(artist: str, title: str) -> str:
-    return f"{artist.strip().lower()}|{title.strip().lower()}"
+def _norm(value: str) -> str:
+    return value.strip().lower()
+
+
+def _upsert_insert(engine: Engine):
+    """Return a dialect-aware insert() constructor that supports on_conflict_do_update."""
+    if engine.dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+        return insert
+    if engine.dialect.name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+        return insert
+    raise NotImplementedError(f"upsert not implemented for dialect: {engine.dialect.name}")
 
 
 class TrackCache:
     def __init__(self, engine: Engine):
         self.engine = engine
 
-    def get(self, ref):
-        from musicagent.models import Track, TrackRef
+    def get(self, ref: TrackRef) -> Track | None:
         with self.engine.connect() as c:
-            row = c.execute(select(tracks_table).where(tracks_table.c.key == _key(ref.artist, ref.title))).mappings().first()
+            row = c.execute(
+                select(tracks_table).where(
+                    tracks_table.c.artist_key == _norm(ref.artist),
+                    tracks_table.c.title_key == _norm(ref.title),
+                )
+            ).mappings().first()
         if not row:
             return None
         return Track(
@@ -58,23 +76,31 @@ class TrackCache:
             duration_s=row["duration_s"], tags=row["tags"] or [], source=row["source"],
         )
 
-    def put(self, track) -> None:
-        key = _key(track.ref.artist, track.ref.title)
+    def put(self, track: Track) -> None:
         values = dict(
-            key=key, artist=track.ref.artist, title=track.ref.title, bpm=track.bpm,
+            artist_key=_norm(track.ref.artist), title_key=_norm(track.ref.title),
+            artist=track.ref.artist, title=track.ref.title, bpm=track.bpm,
             camelot=track.camelot, energy=track.energy, duration_s=track.duration_s,
             tags=track.tags, source=track.source,
         )
+        insert = _upsert_insert(self.engine)
+        stmt = insert(tracks_table).values(**values)
+        update_cols = {
+            k: v for k, v in values.items() if k not in ("artist_key", "title_key")
+        }
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[tracks_table.c.artist_key, tracks_table.c.title_key],
+            set_=update_cols,
+        )
         with self.engine.begin() as c:
-            c.execute(tracks_table.delete().where(tracks_table.c.key == key))
-            c.execute(tracks_table.insert().values(**values))
+            c.execute(stmt)
 
 
 class SetStore:
     def __init__(self, engine: Engine):
         self.engine = engine
 
-    def save(self, request_json: dict, result) -> str:
+    def save(self, request_json: dict, result: SetResult) -> str:
         set_id = uuid.uuid4().hex
         with self.engine.begin() as c:
             c.execute(sets_table.insert().values(
