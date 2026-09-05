@@ -201,7 +201,9 @@ limitations below).
 - **No auth** — the API is a public portfolio demo. `POST /sets` has a
   small in-process rate limit (5 requests/minute per client host); a real
   multi-instance deployment would still want rate limiting at the platform
-  level too (spec §9).
+  level too (spec §9). The client host is the raw transport peer, so behind
+  a non-loopback edge proxy every user shares one bucket unless uvicorn runs
+  with `--forwarded-allow-ips`.
 - Request body is capped at **4000 characters** of free text and the parsed
   track list is capped at **30 tracks** per request (excess tracks are
   truncated with a `notice` in the response, not rejected).

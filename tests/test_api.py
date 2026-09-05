@@ -386,3 +386,21 @@ async def test_store_save_failure_streams_error_event_not_crash(monkeypatch):
     assert GENERIC_ERROR_MESSAGE in body
     assert "event: result" not in body
     assert "db blip" not in body
+
+
+def test_rate_limiter_evicts_key_after_window_fully_expires(monkeypatch):
+    """A host's entry in the internal hit map must not survive past its
+    window: once every hit for that key has expired, the key itself should
+    be gone from _hits, not just left holding an empty deque forever."""
+    from musicagent.api import _RateLimiter
+
+    now = [1000.0]
+    monkeypatch.setattr("musicagent.api.time.monotonic", lambda: now[0])
+
+    limiter = _RateLimiter(max_requests=3, window_s=10.0)
+    assert limiter.allow("1.2.3.4") is True
+    assert "1.2.3.4" in limiter._hits
+
+    now[0] += 20.0  # well past the window
+    assert limiter.allow("5.6.7.8") is True  # a request from an unrelated host
+    assert "1.2.3.4" not in limiter._hits

@@ -45,6 +45,12 @@ OVERALL_DEADLINE_S = 60.0
 # Rate limit for the public, unauthenticated POST /sets endpoint: each track
 # list triggers several outbound HTTP calls plus at least one LLM call, so
 # this is deliberately tight.
+#
+# Keyed on request.client.host, which is the raw transport peer address, not
+# necessarily the end user's IP: behind a PaaS edge proxy that isn't on
+# 127.0.0.1, uvicorn will not rewrite this to the real client IP unless it is
+# run with --forwarded-allow-ips, so every user would share one bucket (the
+# proxy's address) until that flag is set.
 RATE_LIMIT_MAX_REQUESTS = 5
 RATE_LIMIT_WINDOW_S = 60.0
 
@@ -62,9 +68,19 @@ class _RateLimiter:
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
+        # Sweep every key's window, not just this one, and drop any deque
+        # that ends up empty. Without this, every distinct client host ever
+        # seen keeps a (permanently empty, once its window passes) entry in
+        # this dict for the rest of the process lifetime -- a slow, unbounded
+        # memory leak for a long-running process. Cheap: this map only ever
+        # holds as many keys as distinct hosts seen within the last window.
+        for other_key, other_hits in list(self._hits.items()):
+            while other_hits and now - other_hits[0] > self.window_s:
+                other_hits.popleft()
+            if not other_hits:
+                del self._hits[other_key]
+
         hits = self._hits[key]
-        while hits and now - hits[0] > self.window_s:
-            hits.popleft()
         if len(hits) >= self.max_requests:
             return False
         hits.append(now)

@@ -7,7 +7,7 @@ AI-агент (пет-проект для портфолио vojt): по спи�
 - **Spec-driven**: `spec.md` — источник правды. Сначала спека, потом код (см. skill spec-sync).
 - Стек (MVP): Python 3.13, uv, LangGraph + deepagents, Langfuse (трейсинг), Supabase Postgres.
   pgvector (данные + RAG) — phase 2, ещё не используется.
-- LLM: основной — OpenAI (или Luna, OpenAI-совместимый гейтвей, через `OPENAI_BASE_URL`); fallback — Gemini / Groq free tier. Все свапаются через LangChain. Ключи в `.env` (не трогать).
+- LLM: OpenAI (или Luna, OpenAI-совместимый гейтвей, через `OPENAI_BASE_URL`). Свапается через LangChain. Ключи в `.env` (не трогать). Fallback на Gemini / Groq free tier — phase 2 (пакеты в опциональной группе `phase2`, кода фолбэка пока нет).
 - Детерминированное (Camelot-соседи, BPM ±6%, energy curve) — чистый Python + unit-тесты, не LLM.
 - Внешние API (MVP): Deezer, Last.fm, GetSongBPM — все вызовы с timeout и retry.
   MusicBrainz/AcousticBrainz — phase 2 fallback, ещё не используется.

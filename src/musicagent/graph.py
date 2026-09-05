@@ -100,7 +100,7 @@ def build_graph(cache=None, llm=None):
             edges=state["transition_graph"].edges,
         )
         duration_min = state["request"].duration_min
-        if duration_min is not None:
+        if duration_min is not None and duration_min > 0:
             path = _trim_to_duration(path, duration_min)
         return {"path": path}
 

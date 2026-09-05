@@ -340,6 +340,74 @@ async def test_resolved_but_unplaced_track_reported_as_omitted():
     assert [r.title for r in result.omitted] == ["island"]
 
 
+class NonPositiveDurationLLM:
+    """Parses to three compatible tracks with a non-positive duration_min,
+    which must be treated as absent (no trimming)."""
+
+    def with_structured_output(self, schema):
+        self.schema = schema
+        return self
+
+    def invoke(self, prompt):
+        if self.schema is SetRequest:
+            return SetRequest(
+                tracks=[
+                    TrackRef(artist="a", title="t1"),
+                    TrackRef(artist="b", title="t2"),
+                    TrackRef(artist="c", title="t3"),
+                ],
+                duration_min=0,
+                energy_shape="build",
+            )
+        return _Explanations(explanations=["works", "works too"], summary="ok")
+
+
+@pytest.mark.asyncio
+async def test_non_positive_duration_min_is_treated_as_absent_no_trimming():
+    """A model-produced duration_min of 0 (or negative) must not trim the set
+    down to the 2-track floor -- it should be treated the same as no
+    duration_min at all."""
+    engine = get_engine("sqlite:///:memory:")
+    init_db(engine)
+    cache = TrackCache(engine)
+    cache.put(
+        Track(
+            ref=TrackRef(artist="a", title="t1"),
+            bpm=120,
+            camelot="8A",
+            energy=0.2,
+            duration_s=200,
+        )
+    )
+    cache.put(
+        Track(
+            ref=TrackRef(artist="b", title="t2"),
+            bpm=120,
+            camelot="8A",
+            energy=0.5,
+            duration_s=200,
+        )
+    )
+    cache.put(
+        Track(
+            ref=TrackRef(artist="c", title="t3"),
+            bpm=120,
+            camelot="8A",
+            energy=0.8,
+            duration_s=200,
+        )
+    )
+
+    result = await run_set(
+        "a t1, b t2, c t3, no time limit",
+        cache=cache,
+        llm=NonPositiveDurationLLM(),
+    )
+
+    assert len(result.transitions) == 2
+    assert result.omitted == []
+
+
 @pytest.mark.asyncio
 async def test_duration_min_trims_set_from_end_and_reports_omitted():
     """duration_min trims tracks from the end of the path once the summed

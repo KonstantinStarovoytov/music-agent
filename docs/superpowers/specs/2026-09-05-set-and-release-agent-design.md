@@ -41,8 +41,12 @@ parse_input → enrich_tracks → build_transition_graph → find_set_path → e
 | parse_input | LLM | free text → `SetRequest{tracks: list[TrackRef], duration_min?, energy_shape}` |
 | enrich_tracks | code, parallel | `list[TrackRef]` → `list[Track]` (+ `unresolved: list[TrackRef]`) |
 | build_transition_graph | pure Python | `list[Track]` → `TransitionGraph{edges: (a, b, score)}` |
-| find_set_path | pure Python | `TransitionGraph` + `energy_shape` → `SetPath{ordered tracks, per-edge scores}` |
-| explain_set | LLM | `SetPath` → `SetResult{transitions: [{from, to, explanation}], summary}` |
+| find_set_path | pure Python | `TransitionGraph` + `energy_shape` → `SetPath{ordered tracks, per-edge scores}`, followed by a duration trim honouring `duration_min` (keeping a floor of 2 tracks) |
+| explain_set | LLM | `SetPath` → `SetResult{transitions: [{from, to, explanation}], summary, unresolved, omitted}` |
+
+`omitted` holds tracks that enriched fine but were not placed in the final
+path: those trimmed to honour `duration_min`, plus any the pathfinder itself
+left out.
 
 All contracts are Pydantic models in `src/musicagent/models.py`. State schema
 in code must match this table (enforced by spec-sync skill).
@@ -119,5 +123,7 @@ Phase 2 adds pgvector tables (pitch corpus embeddings).
 
 - Audio file analysis (no filesystem/audio dependency by design).
 - Spotify API (audio-features closed for new apps since Nov 2024).
-- Auth/multi-user; the API is a public portfolio demo with rate limiting at
-  the platform level.
+- Auth/multi-user; the API is a public portfolio demo. `POST /sets` has an
+  in-process, per-client-host rate limit (5 requests/minute); the key is the
+  raw transport peer address, so behind a non-loopback edge proxy every user
+  shares one bucket unless the server runs with `--forwarded-allow-ips`.
