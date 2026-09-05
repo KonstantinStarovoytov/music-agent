@@ -38,17 +38,33 @@ async def _get_json(client: httpx.AsyncClient, url: str, **kw) -> dict | None:
 
 
 async def _deezer(client: httpx.AsyncClient, ref: TrackRef) -> dict:
+    """Deezer is a two-step lookup: /search finds the track id (a search hit
+    carries only album, artist, duration, explicit_*, id, isrc, link,
+    md5_image, preview, rank, readable, title, title_short, title_version,
+    type -- no bpm/gain, verified against the live API), then /track/{id}
+    returns the full track object, which does carry bpm/gain."""
     q = f'artist:"{ref.artist}" track:"{ref.title}"'
     data = await _get_json(client, "https://api.deezer.com/search", params={"q": q})
     items = (data or {}).get("data") or []
     if not items:
         return {}
     hit = items[0]
-    out: dict = {"duration_s": hit.get("duration")}
-    if hit.get("bpm"):
-        out["bpm"] = float(hit["bpm"])
-    if hit.get("gain") is not None:
-        out["energy"] = min(max((hit["gain"] + 20) / 20, 0.0), 1.0)
+    track_id = hit.get("id")
+    if not track_id:
+        return {}
+
+    track_data = await _get_json(client, f"https://api.deezer.com/track/{track_id}")
+    if not track_data:
+        return {}
+
+    out: dict = {"duration_s": track_data.get("duration")}
+    # Deezer returns bpm=0 when the tempo is unknown; treat that like a
+    # missing value so the cascade falls through to the next provider
+    # instead of taking 0 BPM as a real reading.
+    if track_data.get("bpm"):
+        out["bpm"] = float(track_data["bpm"])
+    if track_data.get("gain") is not None:
+        out["energy"] = min(max((track_data["gain"] + 20) / 20, 0.0), 1.0)
     return out
 
 

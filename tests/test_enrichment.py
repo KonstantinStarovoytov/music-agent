@@ -9,8 +9,25 @@ from musicagent.db import TrackCache, get_engine, init_db
 from musicagent.enrichment import enrich_all, enrich_one
 from musicagent.models import Track, TrackRef
 
-DEEZER = {"data": [{"bpm": 126.0, "gain": -8.0, "duration": 240}]}
+# Search hit shape verified against the live api.deezer.com/search endpoint:
+# a hit carries only album, artist, duration, explicit_*, id, isrc, link,
+# md5_image, preview, rank, readable, title, title_short, title_version,
+# type -- notably no bpm/gain. Trimmed here to the fields _deezer reads.
+DEEZER_SEARCH = {"data": [{"id": 3135556, "duration": 240}]}
+# Full track object shape verified against the live api.deezer.com/track/{id}
+# endpoint, which does carry bpm/gain.
+DEEZER_TRACK = {"id": 3135556, "bpm": 126.0, "gain": -8.0, "duration": 240}
 GSB = {"search": [{"tempo": "126", "key_of": "Am"}]}
+
+DEEZER_TRACK_ROUTE = r"api\.deezer\.com/track/\d+"
+
+
+def mock_deezer_track(json=DEEZER_TRACK, status_code=200):
+    """Register the /track/{id} route the two-step Deezer lookup makes after
+    a successful /search. Most tests don't care about its call_count, so this
+    is a thin helper rather than something every test wires up by hand."""
+    return respx.get(url__regex=DEEZER_TRACK_ROUTE).respond(status_code, json=json)
+
 
 # Captured at import time, before any test/fixture monkeypatches asyncio.sleep
 # (the autouse fast_retries fixture replaces it with a no-op) -- needed by the
@@ -39,7 +56,8 @@ def fast_retries(monkeypatch):
 @pytest.mark.asyncio
 @respx.mock
 async def test_enrich_one_deezer_bpm_gsb_key():
-    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track()
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": [{"name": "electronic"}]}}
@@ -139,7 +157,7 @@ async def test_enrich_all_partial_failure_does_not_fail_batch():
     def deezer_side_effect(request):
         if "Nobody" in str(request.url):
             return httpx.Response(200, json={"data": []})
-        return httpx.Response(200, json=DEEZER)
+        return httpx.Response(200, json=DEEZER_SEARCH)
 
     def gsb_side_effect(request):
         if "Nobody" in str(request.url):
@@ -149,6 +167,7 @@ async def test_enrich_all_partial_failure_does_not_fail_batch():
     respx.get(url__regex=r"api\.deezer\.com/search.*").mock(
         side_effect=deezer_side_effect
     )
+    mock_deezer_track()
     respx.get(url__regex=r"api\.getsongbpm\.com.*").mock(side_effect=gsb_side_effect)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
@@ -166,7 +185,8 @@ async def test_enrich_all_partial_failure_does_not_fail_batch():
 async def test_missing_getsongbpm_key_skips_provider_without_crash(monkeypatch):
     """Missing GETSONGBPM_API_KEY must not raise; the provider is skipped (no network call)."""
     monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
-    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track()
     gsb_route = respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
     async with httpx.AsyncClient() as client:
         track = await enrich_one(
@@ -183,7 +203,8 @@ async def test_missing_getsongbpm_key_skips_provider_without_crash(monkeypatch):
 async def test_missing_lastfm_key_yields_empty_tags_without_crash(monkeypatch):
     """Missing LASTFM_API_KEY must not raise; tags simply come back empty."""
     monkeypatch.delenv("LASTFM_API_KEY", raising=False)
-    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track()
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
     lastfm_route = respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": [{"name": "electronic"}]}}
@@ -203,8 +224,9 @@ async def test_resolved_track_written_to_cache_and_second_call_skips_network():
     """Every resolved enrichment is written to the cache exactly once, and a subsequent
     call for the same track makes no HTTP request at all."""
     deezer_route = respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
-        json=DEEZER
+        json=DEEZER_SEARCH
     )
+    deezer_track_route = mock_deezer_track()
     gsb_route = respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
     lastfm_route = respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
@@ -218,6 +240,7 @@ async def test_resolved_track_written_to_cache_and_second_call_skips_network():
         track1 = await enrich_one(ref, client, cache)
     assert track1 is not None
     assert deezer_route.call_count == 1
+    assert deezer_track_route.call_count == 1
     assert gsb_route.call_count == 1
     assert lastfm_route.call_count == 1
 
@@ -229,6 +252,7 @@ async def test_resolved_track_written_to_cache_and_second_call_skips_network():
     assert track2 is not None and track2.bpm == track1.bpm
     # No new network calls happened on the cache hit.
     assert deezer_route.call_count == 1
+    assert deezer_track_route.call_count == 1
     assert gsb_route.call_count == 1
     assert lastfm_route.call_count == 1
 
@@ -278,7 +302,8 @@ async def test_provider_returns_json_string_falls_through_without_crash():
 @respx.mock
 async def test_lastfm_single_tag_returned_as_bare_dict():
     """Last.fm's real API quirk: a single tag comes back as a dict, not a list."""
-    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track()
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": {"name": "electronic"}}}
@@ -295,7 +320,8 @@ async def test_lastfm_single_tag_returned_as_bare_dict():
 @respx.mock
 async def test_lastfm_items_missing_name_are_skipped():
     """Tag items lacking a usable 'name' must be skipped, not raise KeyError."""
-    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track()
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": [{"count": 5}, {"name": "electronic"}, "not-a-dict"]}}
@@ -341,12 +367,12 @@ async def test_enrich_all_survives_internal_exception_in_one_track(monkeypatch):
 @pytest.mark.asyncio
 @respx.mock
 async def test_source_reflects_mixed_provenance_not_plain_deezer():
-    """Deezer supplies bpm+duration but no key; GetSongBPM supplies the key. The
-    resulting source must not claim plain 'deezer' since Deezer never supplied the
-    Camelot key that made the track resolvable."""
-    deezer_no_key = {"data": [{"bpm": 126.0, "gain": -8.0, "duration": 240}]}
+    """Deezer supplies bpm+duration but no key (it never does); GetSongBPM supplies
+    the key. The resulting source must not claim plain 'deezer' since Deezer never
+    supplied the Camelot key that made the track resolvable."""
     gsb_key_only = {"search": [{"key_of": "Am"}]}
-    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=deezer_no_key)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track()
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=gsb_key_only)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
@@ -361,6 +387,55 @@ async def test_source_reflects_mixed_provenance_not_plain_deezer():
     assert track.duration_s == 240
     assert track.source != "deezer"
     assert "deezer" in track.source and "getsongbpm" in track.source
+
+
+# --- C1: Deezer two-step lookup (search -> /track/{id}) ---------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_deezer_track_bpm_zero_falls_through_to_next_provider():
+    """Deezer returns bpm=0 when the tempo is unknown (verified against the live
+    api.deezer.com/track/{id} endpoint). That must be treated like a missing bpm
+    and fall through to GetSongBPM, not taken as a real 0 BPM reading."""
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track(json={"id": 3135556, "bpm": 0, "gain": -8.0, "duration": 240})
+    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.bpm == 126.0
+    assert track.source == "getsongbpm"
+    # duration_s is independent of bpm and still comes from Deezer's track lookup.
+    assert track.duration_s == 240
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_deezer_track_lookup_failure_falls_through_without_crash():
+    """If /search succeeds but /track/{id} fails (network error, 500, etc), Deezer
+    must contribute nothing and the cascade must fall through to GetSongBPM."""
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    deezer_track_route = mock_deezer_track(status_code=500)
+    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert deezer_track_route.call_count == 3  # retried like any other provider call
+    assert track is not None
+    assert track.bpm == 126.0
+    assert track.camelot == "8A"
+    assert track.source == "getsongbpm"
+    assert track.duration_s is None
 
 
 # --- Finding 3: overall per-track deadline -----------------------------------
