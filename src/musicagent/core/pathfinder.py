@@ -1,7 +1,7 @@
 import math
 
 from musicagent.core.scoring import build_edges
-from musicagent.models import SetPath, Track
+from musicagent.models import Edge, SetPath, Track
 
 ENERGY_WEIGHT = 0.4
 
@@ -18,13 +18,22 @@ def target_energy(shape: str, pos: int, total: int) -> float:
     raise ValueError(f"unknown shape: {shape!r}")
 
 
-def find_path(tracks: list[Track], shape: str, beam_width: int = 8) -> SetPath:
+def find_path(
+    tracks: list[Track],
+    shape: str,
+    beam_width: int = 8,
+    *,
+    edges: list[Edge] | None = None,
+) -> SetPath:
     n = len(tracks)
     if n == 0:
         return SetPath(tracks=[], edge_scores=[])
 
+    if edges is None:
+        edges = build_edges(tracks)
+
     adj: dict[int, dict[int, float]] = {}
-    for e in build_edges(tracks):
+    for e in edges:
         adj.setdefault(e.a, {})[e.b] = e.score
 
     def fit(i: int, pos: int) -> float:

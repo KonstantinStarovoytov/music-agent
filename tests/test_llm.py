@@ -7,11 +7,13 @@ from musicagent.models import SetPath, SetRequest, Track, TrackRef
 class FakeLLM:
     def __init__(self, result):
         self.result = result
+        self.calls = 0
 
     def with_structured_output(self, schema):
         return self
 
     def invoke(self, prompt):
+        self.calls += 1
         return self.result
 
 
@@ -112,22 +114,24 @@ def test_explain_set_truncates_explanations():
 
 
 def test_explain_set_single_track():
-    """Test that explain_set on a path with 1 track returns no transitions."""
+    """explain_set on a path with 1 track returns no transitions and never
+    invokes the LLM (there is nothing to explain)."""
     tracks = [Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A")]
     path = SetPath(tracks=tracks, edge_scores=[])
     fake = FakeLLM(_Explanations(explanations=[], summary="single track"))
     result = explain_set(path, unresolved=[], llm=fake)
     assert len(result.transitions) == 0
-    assert result.summary == "single track"
+    assert fake.calls == 0
 
 
 def test_explain_set_empty_path():
-    """Test that explain_set on an empty path returns no transitions."""
+    """explain_set on an empty path returns no transitions and never invokes
+    the LLM (there is nothing to explain)."""
     path = SetPath(tracks=[], edge_scores=[])
     fake = FakeLLM(_Explanations(explanations=[], summary="empty"))
     result = explain_set(path, unresolved=[], llm=fake)
     assert len(result.transitions) == 0
-    assert result.summary == "empty"
+    assert fake.calls == 0
 
 
 def test_explain_set_preserves_unresolved():

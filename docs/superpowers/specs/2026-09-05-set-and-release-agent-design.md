@@ -56,10 +56,11 @@ in code must match this table (enforced by spec-sync skill).
   Hamiltonian-ish path over resolved tracks (not required to include all).
 
 ### Enrichment cascade
-Per track: Deezer (no key needed) → GetSongBPM → MusicBrainz/AcousticBrainz;
-tags/genre from Last.fm. Results cached in `tracks` table; cache hit skips
-external calls. Unresolvable tracks are marked `unresolved`, excluded from the
-graph, and reported in the response.
+Per track: Deezer (no key needed) → GetSongBPM; tags/genre from Last.fm.
+Results cached in `tracks` table; cache hit skips external calls.
+Unresolvable tracks are marked `unresolved`, excluded from the graph, and
+reported in the response. MusicBrainz/AcousticBrainz as a further BPM/key
+fallback is deferred to phase 2 (see section 8).
 
 ## 4. Data model (Supabase Postgres)
 
@@ -97,6 +98,8 @@ Phase 2 adds pgvector tables (pitch corpus embeddings).
 
 ## 8. Phase 2 roadmap (not in MVP)
 
+- MusicBrainz/AcousticBrainz as a further BPM/key fallback after
+  Deezer → GetSongBPM.
 - Release Assistant on deepagents: researcher / positioning / copywriter
   subagents.
 - RAG on pgvector: corpus of pitch examples and label/playlist guides —

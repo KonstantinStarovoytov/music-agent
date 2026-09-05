@@ -30,6 +30,10 @@ class Edge(BaseModel):
     score: float
 
 
+class TransitionGraph(BaseModel):
+    edges: list[Edge]
+
+
 class SetPath(BaseModel):
     tracks: list[Track]
     edge_scores: list[float]

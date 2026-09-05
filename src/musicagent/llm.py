@@ -79,6 +79,11 @@ def parse_input(text: str, llm=None) -> SetRequest:
 
 
 def explain_set(path: SetPath, unresolved: list[TrackRef], llm=None) -> SetResult:
+    if len(path.tracks) < 2:
+        return SetResult(
+            transitions=[], summary="No transitions to explain.", unresolved=unresolved
+        )
+
     llm = llm or get_llm()
     pairs = list(zip(path.tracks, path.tracks[1:]))
     lines = "\n".join(
