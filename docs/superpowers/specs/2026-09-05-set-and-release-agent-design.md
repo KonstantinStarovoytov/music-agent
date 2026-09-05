@@ -26,9 +26,8 @@ explaining decisions); all music math is deterministic, tested Python.
 - LLM: OpenAI (or Luna via `OPENAI_BASE_URL`); fallback Gemini/Groq free tier
 - Langfuse (cloud free tier) — tracing on every node
 - Supabase Postgres (free tier); pgvector enabled in phase 2
-- Music data (all free): Deezer → GetSongBPM (BPM/key cascade), Last.fm
-  (tags, similar artists); MusicBrainz/AcousticBrainz as a further BPM/key
-  fallback is deferred to phase 2
+- Music data (all free): Deezer → GetSongBPM → MusicBrainz/AcousticBrainz
+  (BPM/key cascade), Last.fm (tags, similar artists)
 
 ## 3. MVP architecture — Set Builder graph
 
@@ -66,16 +65,49 @@ in code must match this table (enforced by spec-sync skill).
   at 30 tracks, both applied before enrichment so the cost cap is real.
 
 ### Enrichment cascade
-Per track: Deezer (no key needed) → GetSongBPM; tags/genre from Last.fm.
+Per track: Deezer (no key needed) → GetSongBPM → MusicBrainz/AcousticBrainz;
+tags/genre from Last.fm. The cascade stops as soon as both `bpm` and
+`camelot` are known, so the third provider is only consulted when the first
+two didn't together supply both.
+
+MusicBrainz/AcousticBrainz needs no API key, unlike GetSongBPM (which
+additionally requires a public backlink the site doesn't have, so in
+practice it never returns a key today). The lookup is two calls:
+1. MusicBrainz recording search (`GET /ws/2/recording?query=...&fmt=json`)
+   returns a list of candidate recording MBIDs for the artist/title — a
+   track commonly has several, and only some were ever analysed by
+   AcousticBrainz.
+2. A single **batch** AcousticBrainz low-level lookup
+   (`GET /api/v1/low-level?recording_ids=<id1>;<id2>;...`) is made for all
+   candidate MBIDs at once, rather than one request per MBID (which sees
+   roughly a 1/6 hit rate) — the first returned document with a `tonal`
+   section is used.
+
+From that document: `tonal.key_key` + `tonal.key_scale` give the musical
+key (parsed via `parse_camelot`, which already handles sharps/flats and
+major/minor); `rhythm.bpm` gives the tempo; `lowlevel.average_loudness`
+(already ~0..1) is used as an energy proxy when present. `tonal.key_strength`
+(0..1) is persisted as `key_confidence` on the `Track` and surfaced to
+`explain_set` so the LLM can hedge low-confidence key claims — this
+key-detection is algorithmic, not ground truth.
+
+MusicBrainz enforces a hard 1 request/second limit per client (503 above
+that rate); calls to it go through a module-level throttle (a lock plus a
+minimum interval between requests) that applies only to MusicBrainz, not to
+the other providers, which remain fully concurrent. This means a large
+batch of tracks that all need the MusicBrainz fallback pays roughly
+1 second of extra latency per track for that fallback alone (see README).
+
 Results cached in `tracks` table; cache hit skips external calls.
 Unresolvable tracks are marked `unresolved`, excluded from the graph, and
-reported in the response. MusicBrainz/AcousticBrainz as a further BPM/key
-fallback is deferred to phase 2 (see section 8).
+reported in the response.
 
 ## 4. Data model (Supabase Postgres)
 
 - `tracks`: id, artist, title, bpm, musical_key, camelot, energy, duration_s,
-  tags jsonb, source, fetched_at. Unique on (artist, title) normalized.
+  tags jsonb, source, key_confidence, fetched_at. Unique on (artist, title)
+  normalized. `key_confidence` is only ever set when `camelot` came from
+  AcousticBrainz (its `tonal.key_strength`); null otherwise.
 - `sets`: id, request jsonb (the raw request, including the truncation
   `notice` if any), result jsonb (the full `SetResult`), created_at. Stored
   so the site demo can replay real past sets.
@@ -110,8 +142,6 @@ Phase 2 adds pgvector tables (pitch corpus embeddings).
 
 ## 8. Phase 2 roadmap (not in MVP)
 
-- MusicBrainz/AcousticBrainz as a further BPM/key fallback after
-  Deezer → GetSongBPM.
 - Release Assistant on deepagents: researcher / positioning / copywriter
   subagents.
 - RAG on pgvector: corpus of pitch examples and label/playlist guides —

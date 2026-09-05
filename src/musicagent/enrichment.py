@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 
 import httpx
 
@@ -9,6 +10,16 @@ from musicagent.models import Track, TrackRef
 
 TIMEOUT = 10.0
 RETRIES = 2
+
+# MusicBrainz allows 1 request/second per client and starts returning 503 once
+# exceeded. This is a hard external constraint (not configurable per-request),
+# so it's enforced with a module-level throttle shared by every concurrent
+# enrichment, applied ONLY to MusicBrainz calls -- Deezer/GetSongBPM/Last.fm
+# stay fully concurrent.
+MUSICBRAINZ_MIN_INTERVAL_S = 1.1
+MUSICBRAINZ_USER_AGENT = "musicagent/0.1 ( https://github.com/ )"
+_musicbrainz_lock = asyncio.Lock()
+_musicbrainz_last_request_at = 0.0
 # Per-track deadline. Kept short because ENRICH_CONCURRENCY tracks run at once
 # inside a single SSE request with its own overall deadline (see
 # OVERALL_DEADLINE_S in api.py) -- 30 tracks / 8 concurrency ~= 4 batches, so
@@ -101,6 +112,82 @@ async def _getsongbpm(client: httpx.AsyncClient, ref: TrackRef) -> dict:
     return out
 
 
+async def _musicbrainz_search(client: httpx.AsyncClient, ref: TrackRef) -> list[str]:
+    """Query MusicBrainz recording search for candidate MBIDs, respecting the
+    module-level 1 req/sec throttle (MusicBrainz starts returning 503 above
+    that rate). Returns every id in the response: a track commonly has several
+    recording MBIDs and only some were ever analysed by AcousticBrainz, so all
+    candidates are tried together in one AcousticBrainz batch call."""
+    global _musicbrainz_last_request_at
+    query = f'artist:"{ref.artist}" AND recording:"{ref.title}"'
+    async with _musicbrainz_lock:
+        now = time.monotonic()
+        wait = _musicbrainz_last_request_at + MUSICBRAINZ_MIN_INTERVAL_S - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        data = await _get_json(
+            client,
+            "https://musicbrainz.org/ws/2/recording",
+            params={"query": query, "fmt": "json", "limit": 15},
+            headers={"User-Agent": MUSICBRAINZ_USER_AGENT},
+        )
+        _musicbrainz_last_request_at = time.monotonic()
+    recordings = (data or {}).get("recordings") or []
+    return [r["id"] for r in recordings if isinstance(r, dict) and r.get("id")]
+
+
+async def _musicbrainz_acousticbrainz(client: httpx.AsyncClient, ref: TrackRef) -> dict:
+    """Fallback with no API key needed: MusicBrainz recording search finds
+    candidate MBIDs, then a single batch AcousticBrainz lookup supplies key,
+    bpm and an energy proxy for whichever of them were ever analysed
+    (one-mbid-at-a-time lookups see roughly a 1/6 hit rate, hence the batch).
+    Only the first returned MBID with a `tonal` section is used."""
+    mbids = await _musicbrainz_search(client, ref)
+    if not mbids:
+        return {}
+
+    ab_data = await _get_json(
+        client,
+        "https://acousticbrainz.org/api/v1/low-level",
+        params={"recording_ids": ";".join(mbids)},
+    )
+    if not ab_data:
+        return {}
+
+    doc = None
+    for mbid in mbids:
+        entry = ab_data.get(mbid)
+        candidate = (entry or {}).get("0") if isinstance(entry, dict) else None
+        if isinstance(candidate, dict) and isinstance(candidate.get("tonal"), dict):
+            doc = candidate
+            break
+    if doc is None:
+        return {}
+
+    out: dict = {}
+    tonal = doc["tonal"]
+    key_key = tonal.get("key_key")
+    key_scale = tonal.get("key_scale")
+    if key_key and key_scale:
+        try:
+            out["camelot"] = parse_camelot(f"{key_key} {key_scale}")
+        except ValueError:
+            pass
+    key_strength = tonal.get("key_strength")
+    if isinstance(key_strength, (int, float)):
+        out["key_confidence"] = float(key_strength)
+
+    rhythm = doc.get("rhythm")
+    if isinstance(rhythm, dict) and rhythm.get("bpm"):
+        out["bpm"] = float(rhythm["bpm"])
+
+    lowlevel = doc.get("lowlevel")
+    if isinstance(lowlevel, dict) and lowlevel.get("average_loudness") is not None:
+        out["energy"] = min(max(float(lowlevel["average_loudness"]), 0.0), 1.0)
+
+    return out
+
+
 async def _lastfm_tags(client: httpx.AsyncClient, ref: TrackRef) -> list[str]:
     api_key = os.environ.get("LASTFM_API_KEY")
     if not api_key:
@@ -129,7 +216,11 @@ async def _lastfm_tags(client: httpx.AsyncClient, ref: TrackRef) -> list[str]:
     return names
 
 
-_PROVIDER_NAMES = {_deezer: "deezer", _getsongbpm: "getsongbpm"}
+_PROVIDER_NAMES = {
+    _deezer: "deezer",
+    _getsongbpm: "getsongbpm",
+    _musicbrainz_acousticbrainz: "acousticbrainz",
+}
 
 
 async def _enrich_one_inner(
@@ -140,7 +231,7 @@ async def _enrich_one_inner(
     # they were first set (so "source" reflects true provenance, never a
     # provider that merely returned an incomplete hit).
     field_source: dict[str, str] = {}
-    for provider in (_deezer, _getsongbpm):
+    for provider in (_deezer, _getsongbpm, _musicbrainz_acousticbrainz):
         got = await provider(client, ref)
         name = _PROVIDER_NAMES[provider]
         for k, v in got.items():
@@ -169,6 +260,7 @@ async def _enrich_one_inner(
         duration_s=merged.get("duration_s"),
         tags=await _lastfm_tags(client, ref),
         source=source,
+        key_confidence=merged.get("key_confidence"),
     )
     if cache:
         cache.put(track)
@@ -179,7 +271,8 @@ async def enrich_one(
     ref: TrackRef, client: httpx.AsyncClient, cache: TrackCache | None
 ) -> Track | None:
     """Resolve bpm/camelot/tags for a single track via the provider cascade
-    (Deezer -> GetSongBPM), checking the cache first and writing back on success.
+    (Deezer -> GetSongBPM -> MusicBrainz/AcousticBrainz), checking the cache
+    first and writing back on success.
     Returns None (unresolved) if no provider combination yields both bpm and camelot,
     or if the whole lookup does not complete within ENRICH_DEADLINE_S seconds."""
     if cache and (hit := cache.get(ref)):

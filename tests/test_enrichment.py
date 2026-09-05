@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -140,6 +141,7 @@ async def test_provider_malformed_json_retries_then_falls_through():
 async def test_all_providers_fail_marks_unresolved_not_crash():
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(500)
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(500)
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(500)
     async with httpx.AsyncClient() as client:
         track = await enrich_one(
             TrackRef(artist="Bicep", title="Glue"), client, cache=None
@@ -188,13 +190,15 @@ async def test_missing_getsongbpm_key_skips_provider_without_crash(monkeypatch):
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track()
     gsb_route = respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(json={"recordings": []})
     async with httpx.AsyncClient() as client:
         track = await enrich_one(
             TrackRef(artist="Bicep", title="Glue"), client, cache=None
         )
     assert gsb_route.call_count == 0
-    # Deezer alone never supplies a Camelot key, and GSB is skipped -> unresolved,
-    # but critically: no exception was raised.
+    # Deezer alone never supplies a Camelot key, GSB is skipped, and
+    # MusicBrainz finds no recordings -> unresolved, but critically: no
+    # exception was raised.
     assert track is None
 
 
@@ -499,3 +503,137 @@ async def test_enrich_all_bounds_concurrency(monkeypatch):
     assert unresolved == []
     assert max_seen <= enrichment_mod.ENRICH_CONCURRENCY
     assert max_seen == enrichment_mod.ENRICH_CONCURRENCY  # actually saturates the bound
+
+
+# --- MusicBrainz/AcousticBrainz fallback ------------------------------------
+
+MB_ONE_RECORDING = {"recordings": [{"id": "mbid-1"}]}
+
+
+def _ab_doc(**overrides):
+    doc = {
+        "tonal": {"key_key": "A#", "key_scale": "minor", "key_strength": 0.8},
+        "rhythm": {"bpm": 128.0},
+        "lowlevel": {"average_loudness": 0.7},
+    }
+    doc.update(overrides)
+    return doc
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_acousticbrainz_supplies_key_deezer_supplies_bpm(monkeypatch):
+    """Deezer gives bpm but no key, GetSongBPM is unavailable (no key configured),
+    and MusicBrainz/AcousticBrainz supplies the missing camelot key."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track()
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(json=MB_ONE_RECORDING)
+    respx.get(url__regex=r"acousticbrainz\.org.*").respond(
+        json={"mbid-1": {"0": _ab_doc()}}
+    )
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.camelot == "3A"  # A# minor
+    assert track.bpm == 126.0  # from Deezer, not overwritten by AcousticBrainz
+    assert "deezer" in track.source and "acousticbrainz" in track.source
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_acousticbrainz_batch_lookup_hits_third_mbid_in_one_request(
+    monkeypatch,
+):
+    """MusicBrainz returns 3 MBIDs; only the third has AcousticBrainz data. The
+    track must still resolve, and only ONE AcousticBrainz request (the batch)
+    must be made -- not one per MBID."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json={"data": []})
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(
+        json={"recordings": [{"id": "mbid-a"}, {"id": "mbid-b"}, {"id": "mbid-c"}]}
+    )
+    ab_route = respx.get(url__regex=r"acousticbrainz\.org.*").respond(
+        json={"mbid-c": {"0": _ab_doc()}}
+    )
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.camelot == "3A"
+    assert track.bpm == 128.0
+    assert ab_route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_musicbrainz_no_recordings_skips_acousticbrainz_call(monkeypatch):
+    """When MusicBrainz returns no recordings, AcousticBrainz must not be called
+    at all, and the track ends up unresolved."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json={"data": []})
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(json={"recordings": []})
+    ab_route = respx.get(url__regex=r"acousticbrainz\.org.*").respond(json={})
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is None
+    assert ab_route.call_count == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_acousticbrainz_unparseable_key_falls_back_to_unresolved(monkeypatch):
+    """A document whose tonal.key_key can't be parsed as a musical key must not
+    raise; the track simply stays unresolved (no other provider supplies bpm+key
+    here)."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json={"data": []})
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(json=MB_ONE_RECORDING)
+    respx.get(url__regex=r"acousticbrainz\.org.*").respond(
+        json={"mbid-1": {"0": _ab_doc(tonal={"key_key": "H#", "key_scale": "minor"})}}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_musicbrainz_throttle_enforces_minimum_interval(monkeypatch):
+    """Two concurrent enrichments must not fire their MusicBrainz requests less
+    than MUSICBRAINZ_MIN_INTERVAL_S apart."""
+    monkeypatch.setattr(enrichment_mod, "MUSICBRAINZ_MIN_INTERVAL_S", 0.2)
+    monkeypatch.setattr(enrichment_mod, "_musicbrainz_last_request_at", 0.0)
+    # Restore real sleep for just this test: the autouse fast_retries fixture
+    # patches it to a no-op, which would defeat the throttle being tested.
+    monkeypatch.setattr("musicagent.enrichment.asyncio.sleep", _REAL_SLEEP)
+
+    timestamps: list[float] = []
+
+    def mb_side_effect(request):
+        timestamps.append(time.monotonic())
+        return httpx.Response(200, json={"recordings": []})
+
+    respx.get(url__regex=r"musicbrainz\.org.*").mock(side_effect=mb_side_effect)
+
+    async with httpx.AsyncClient() as client:
+        await asyncio.gather(
+            enrichment_mod._musicbrainz_search(client, TrackRef(artist="A", title="B")),
+            enrichment_mod._musicbrainz_search(client, TrackRef(artist="C", title="D")),
+        )
+
+    assert len(timestamps) == 2
+    assert timestamps[1] - timestamps[0] >= 0.2 - 0.02

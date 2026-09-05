@@ -33,6 +33,8 @@ User request:
 EXPLAIN_PROMPT = """You are a DJ explaining a set. For each consecutive pair of tracks
 below, write one short explanation of why the transition works (key relationship on the
 Camelot wheel, BPM closeness, energy movement). Then a 1-2 sentence summary of the set arc.
+Some tracks show a key confidence (0-1, from algorithmic key detection); when it's low
+(below ~0.5), hedge the key claim in your explanation instead of stating it flatly.
 Return exactly {n} explanations, in order.
 
 Tracks (in play order, with camelot/bpm/energy):
@@ -100,10 +102,19 @@ def explain_set(
 
     llm = llm or get_llm()
     pairs = list(zip(path.tracks, path.tracks[1:]))
-    lines = "\n".join(
-        f"{i + 1}. {t.ref.artist} - {t.ref.title} [{t.camelot}, {t.bpm:.0f} BPM, energy {t.energy:.2f}]"
-        for i, t in enumerate(path.tracks)
-    )
+
+    def _track_line(i: int, t) -> str:
+        conf = (
+            f", key confidence {t.key_confidence:.2f}"
+            if t.key_confidence is not None
+            else ""
+        )
+        return (
+            f"{i + 1}. {t.ref.artist} - {t.ref.title} "
+            f"[{t.camelot}, {t.bpm:.0f} BPM, energy {t.energy:.2f}{conf}]"
+        )
+
+    lines = "\n".join(_track_line(i, t) for i, t in enumerate(path.tracks))
     # Only add this line (and its tokens) when there's something to say --
     # most requests place every resolved track, so this costs nothing then.
     omitted_note = ""

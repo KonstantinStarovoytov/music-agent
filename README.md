@@ -73,11 +73,20 @@ network/LLM):
   doing two different jobs (local smoothness vs. overall arc).
 
 **Enrichment cascade** (`src/musicagent/enrichment.py`): per track, Deezer
-(no key required) → GetSongBPM for BPM/key, with tags/genre from Last.fm.
-Every external call has a timeout and retries. Results are cached in the
-`tracks` table (Postgres, or SQLite locally); a cache hit skips all external
-calls. Tracks that can't be resolved are marked `unresolved`, excluded from
-the graph, and reported back in the response instead of silently dropped.
+(no key required) → GetSongBPM → MusicBrainz/AcousticBrainz for BPM/key,
+with tags/genre from Last.fm. The cascade stops as soon as both are known.
+MusicBrainz/AcousticBrainz needs no API key: MusicBrainz recording search
+finds candidate MBIDs, then a single batch AcousticBrainz lookup (all
+candidate MBIDs in one request) supplies key, BPM, and an energy proxy for
+whichever were ever analysed — one-MBID-at-a-time lookups see roughly a 1/6
+hit rate, hence the batch. MusicBrainz enforces a hard 1 request/second
+limit, enforced here by a module-level throttle applied only to that
+provider (the others stay fully concurrent); see Limitations below for what
+that costs in latency. Every external call has a timeout and retries.
+Results are cached in the `tracks` table (Postgres, or SQLite locally); a
+cache hit skips all external calls. Tracks that can't be resolved are
+marked `unresolved`, excluded from the graph, and reported back in the
+response instead of silently dropped.
 
 ## Tech stack
 
@@ -103,7 +112,7 @@ cp .env.example .env       # fill in keys — see table below
 ### Run the tests (no keys needed)
 
 ```bash
-uv run pytest        # 133 tests, no network/LLM calls — all pure Python + stubs
+uv run pytest        # 151 tests, no network/LLM calls — all pure Python + stubs
 uv run ruff check .   # lint
 ```
 
@@ -187,17 +196,34 @@ From [`.env.example`](.env.example):
 | `LANGFUSE_HOST` | optional | Defaults to `https://cloud.langfuse.com` |
 | `DATABASE_URL` | **required** | Postgres (Supabase) in prod, or any SQLAlchemy URL (e.g. `sqlite:////tmp/musicagent.db`) locally/in tests |
 | `LASTFM_API_KEY` | for full enrichment | Tags / genre / similar artists |
-| `GETSONGBPM_API_KEY` | for full enrichment | BPM/key fallback after Deezer |
+| `GETSONGBPM_API_KEY` | for full enrichment | BPM/key fallback after Deezer (see limitations — currently unreliable) |
 | `SITE_ORIGIN` | recommended | Allows CORS from this origin; with none set, CORS is closed (no cross-origin access at all) |
 
-Deezer and MusicBrainz need no key. MusicBrainz is not currently used (see
-limitations below).
+Deezer and MusicBrainz/AcousticBrainz need no key.
 
 ## Limitations (MVP)
 
-- The enrichment cascade is **Deezer → GetSongBPM**, with tags from
-  Last.fm. MusicBrainz/AcousticBrainz as a further BPM/key fallback is
-  designed but deferred to phase 2 (spec §3, §8).
+- The enrichment cascade is **Deezer → GetSongBPM → MusicBrainz/AcousticBrainz**,
+  with tags from Last.fm (spec §3). GetSongBPM in practice rarely contributes a
+  key: its API requires a public backlink to the site that isn't in place, so
+  that step is effectively skipped and MusicBrainz/AcousticBrainz carries most
+  of the key/BPM resolution today.
+- **Coverage is uneven by release type.** Measured against the live APIs:
+  6/6 resolved on a mainstream electronic/rock sample, but 0/15 on an
+  underground techno playlist — catalogued, released music resolves well;
+  small-label/underground tracks often aren't in Deezer, GetSongBPM, or
+  MusicBrainz/AcousticBrainz at all.
+- **Key detection is algorithmic, not ground truth.** AcousticBrainz's key
+  estimate is roughly 70-80% accurate, which is why `Track.key_confidence`
+  (from `tonal.key_strength`) is surfaced through to `explain_set` — the LLM
+  is asked to hedge the key claim when confidence is low rather than state
+  it flatly.
+- **MusicBrainz's rate limit adds latency.** It allows only 1 request/second
+  per client, enforced here by a module-level throttle on that provider
+  alone. On a cold cache, a 30-track request where every track needs the
+  MusicBrainz/AcousticBrainz fallback can take on the order of ~35s for
+  enrichment alone (30 tracks × ~1.1s throttle interval), even though the
+  other providers run fully concurrently.
 - **No auth** — the API is a public portfolio demo. `POST /sets` has a
   small in-process rate limit (5 requests/minute per client host); a real
   multi-instance deployment would still want rate limiting at the platform
@@ -223,8 +249,6 @@ limitations below).
 
 From spec §8 (phase 2 roadmap, not in MVP):
 
-- MusicBrainz/AcousticBrainz as a further BPM/key fallback after
-  Deezer → GetSongBPM.
 - **Release Assistant** on deepagents: researcher / positioning / copywriter
   subagents, given the user's own track.
 - RAG on pgvector — a corpus of pitch examples and label/playlist guides

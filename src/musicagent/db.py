@@ -34,6 +34,7 @@ tracks_table = Table(
     Column("duration_s", Integer),
     Column("tags", JSON),
     Column("source", String),
+    Column("key_confidence", Float),
     Column("fetched_at", DateTime, server_default=func.now()),
 )
 
@@ -100,6 +101,7 @@ class TrackCache:
             duration_s=row["duration_s"],
             tags=row["tags"] or [],
             source=row["source"],
+            key_confidence=row["key_confidence"],
         )
 
     def put(self, track: Track) -> None:
@@ -114,6 +116,7 @@ class TrackCache:
             "duration_s": track.duration_s,
             "tags": track.tags,
             "source": track.source,
+            "key_confidence": track.key_confidence,
         }
         insert = _upsert_insert(self.engine)
         stmt = insert(tracks_table).values(**values)

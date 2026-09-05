@@ -16,6 +16,9 @@ class Track(BaseModel):
     duration_s: int | None = None
     tags: list[str] = []
     source: str = "unknown"
+    # Algorithmic key-detection confidence (AcousticBrainz `tonal.key_strength`,
+    # 0..1) when the camelot key came from that provider; None otherwise.
+    key_confidence: float | None = None
 
 
 class SetRequest(BaseModel):
