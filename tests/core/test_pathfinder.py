@@ -98,3 +98,29 @@ def test_find_path_prefers_longer_path_over_higher_scoring_shorter_path():
 
     assert len(path.tracks) == 3
     assert {tr.ref.title for tr in path.tracks} == {"m", "n", "o"}
+
+
+def test_find_path_longest_path_survives_beam_truncation():
+    # Same x/y vs. m/n/o setup as the test above, plus three extra isolated
+    # decoy pairs (each mutually incompatible in key with everything else, so
+    # they can never chain past 2 tracks). This brings round 1's candidate
+    # count to 12, well past beam_width=4, so the beam_width slice genuinely
+    # discards most round-1 candidates -- the m/n/o chain must survive that
+    # truncation and go on to win as the longest path.
+    x = t("x", 120, "1A", 0.5)
+    y = t("y", 120, "1A", 0.5)
+    m = t("m", 100, "6A", 0.1)
+    n = t("n", 106, "6B", 0.9)
+    o = t("o", 112, "7B", 0.1)
+    d1a = t("d1a", 100, "9A", 0.1)
+    d1b = t("d1b", 105.8, "10A", 0.95)
+    d2a = t("d2a", 130, "11A", 0.1)
+    d2b = t("d2b", 137.6, "12A", 0.95)
+    d3a = t("d3a", 150, "2B", 0.1)
+    d3b = t("d3b", 158.9, "3B", 0.95)
+    tracks = [x, y, m, n, o, d1a, d1b, d2a, d2b, d3a, d3b]
+
+    path = find_path(tracks, "build", beam_width=4)
+
+    assert len(path.tracks) == 3
+    assert {tr.ref.title for tr in path.tracks} == {"m", "n", "o"}
