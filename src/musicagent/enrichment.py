@@ -6,7 +6,27 @@ import httpx
 
 from musicagent.core.camelot import parse_camelot
 from musicagent.db import TrackCache
-from musicagent.models import Track, TrackRef
+from musicagent.models import Track, TrackRef, UnresolvedTrack
+
+# Machine-readable reason -> human-readable sentence, used to build
+# UnresolvedTrack entries. Keep in sync with UnresolvedTrack.reason's Literal.
+_REASON_MESSAGES = {
+    "not_found": "No provider recognised this track.",
+    "no_key": "Found the track and its tempo, but no provider supplied a musical key.",
+    "no_bpm": "Found a musical key for this track, but no provider supplied its tempo.",
+    "timeout": "Lookup for this track did not finish before the per-track deadline.",
+    "error": "An unexpected error occurred while looking up this track.",
+}
+
+
+def _unresolved(ref: TrackRef, reason: str) -> UnresolvedTrack:
+    return UnresolvedTrack(
+        artist=ref.artist,
+        title=ref.title,
+        reason=reason,
+        message=_REASON_MESSAGES[reason],
+    )
+
 
 TIMEOUT = 10.0
 RETRIES = 2
@@ -328,7 +348,7 @@ _PROVIDER_NAMES = {
 
 async def _enrich_one_inner(
     ref: TrackRef, client: httpx.AsyncClient, cache: TrackCache | None
-) -> Track | None:
+) -> Track | UnresolvedTrack:
     merged: dict = {}
     # Which provider supplied the musically load-bearing fields, in the order
     # they were first set (so "source" reflects true provenance, never a
@@ -366,7 +386,13 @@ async def _enrich_one_inner(
             break
 
     if "bpm" not in merged or "camelot" not in merged:
-        return None
+        if "bpm" not in merged and "camelot" not in merged:
+            reason = "not_found"
+        elif "camelot" not in merged:
+            reason = "no_key"
+        else:
+            reason = "no_bpm"
+        return _unresolved(ref, reason)
 
     providers = []
     for key in ("bpm", "camelot"):
@@ -392,12 +418,13 @@ async def _enrich_one_inner(
 
 async def enrich_one(
     ref: TrackRef, client: httpx.AsyncClient, cache: TrackCache | None
-) -> Track | None:
+) -> Track | UnresolvedTrack:
     """Resolve bpm/camelot/tags for a single track via the provider cascade
     (Deezer -> GetSongBPM -> MusicBrainz/AcousticBrainz), checking the cache
     first and writing back on success.
-    Returns None (unresolved) if no provider combination yields both bpm and camelot,
-    or if the whole lookup does not complete within ENRICH_DEADLINE_S seconds."""
+    Returns an `UnresolvedTrack` (carrying a machine-readable reason) if no
+    provider combination yields both bpm and camelot, or if the whole lookup
+    does not complete within ENRICH_DEADLINE_S seconds (reason "timeout")."""
     if cache and (hit := cache.get(ref)):
         return hit
 
@@ -406,22 +433,26 @@ async def enrich_one(
             _enrich_one_inner(ref, client, cache), timeout=ENRICH_DEADLINE_S
         )
     except TimeoutError:
-        return None
+        return _unresolved(ref, "timeout")
 
 
 async def enrich_all(
     refs: list[TrackRef], cache: TrackCache | None
-) -> tuple[list[Track], list[TrackRef]]:
+) -> tuple[list[Track], list[UnresolvedTrack]]:
     """Enrich all refs concurrently, bounded to ENRICH_CONCURRENCY tracks in flight
     at once (a semaphore gates per-track work) so a large track list can't fan out
     into an unbounded number of simultaneous upstream HTTP calls. A single
     unresolvable/failing track never fails the whole batch; it is simply reported
-    in the unresolved list. Any unexpected exception from an individual track's
-    enrichment is also treated as unresolved rather than propagated, so one buggy
-    provider path can never take down the batch."""
+    in the unresolved list, each entry carrying a reason (see UnresolvedTrack).
+    Any unexpected exception from an individual track's enrichment is also
+    treated as unresolved (reason "timeout" for a TimeoutError that somehow
+    still escapes enrich_one, "error" for anything else) rather than
+    propagated, so one buggy provider path can never take down the batch."""
     sem = asyncio.Semaphore(ENRICH_CONCURRENCY)
 
-    async def _bounded(ref: TrackRef, client: httpx.AsyncClient) -> Track | None:
+    async def _bounded(
+        ref: TrackRef, client: httpx.AsyncClient
+    ) -> Track | UnresolvedTrack:
         async with sem:
             return await enrich_one(ref, client, cache)
 
@@ -430,5 +461,14 @@ async def enrich_all(
             *(_bounded(r, client) for r in refs), return_exceptions=True
         )
     resolved = [t for t in results if isinstance(t, Track)]
-    unresolved = [r for r, t in zip(refs, results) if not isinstance(t, Track)]
+    unresolved: list[UnresolvedTrack] = []
+    for ref, t in zip(refs, results):
+        if isinstance(t, Track):
+            continue
+        if isinstance(t, UnresolvedTrack):
+            unresolved.append(t)
+        elif isinstance(t, TimeoutError):
+            unresolved.append(_unresolved(ref, "timeout"))
+        else:
+            unresolved.append(_unresolved(ref, "error"))
     return resolved, unresolved

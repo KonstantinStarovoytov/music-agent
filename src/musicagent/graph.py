@@ -14,6 +14,7 @@ from musicagent.models import (
     Track,
     TrackRef,
     TransitionGraph,
+    UnresolvedTrack,
 )
 
 MAX_TRACKS = 30
@@ -23,7 +24,7 @@ class SetState(TypedDict, total=False):
     text: str
     request: SetRequest
     tracks: list[Track]
-    unresolved: list[TrackRef]
+    unresolved: list[UnresolvedTrack]
     transition_graph: TransitionGraph
     path: SetPath
     result: SetResult

@@ -2,7 +2,14 @@ import os
 
 from pydantic import BaseModel
 
-from musicagent.models import SetPath, SetRequest, SetResult, TrackRef, Transition
+from musicagent.models import (
+    SetPath,
+    SetRequest,
+    SetResult,
+    TrackRef,
+    Transition,
+    UnresolvedTrack,
+)
 
 
 def get_llm():
@@ -35,10 +42,12 @@ below, write one short explanation of why the transition works (key relationship
 Camelot wheel, BPM closeness, energy movement). Then a 1-2 sentence summary of the set arc.
 Some tracks show a key confidence (0-1, from algorithmic key detection); when it's low
 (below ~0.5), hedge the key claim in your explanation instead of stating it flatly.
+If any tracks could not be resolved or were left out, briefly mention them in the summary
+in plain language, using only the reasons given below -- never invent a different reason.
 Return exactly {n} explanations, in order.
 
 Tracks (in play order, with camelot/bpm/energy):
-{tracks}{omitted_note}"""
+{tracks}{omitted_note}{unresolved_note}"""
 
 
 def _invoke_structured(llm, schema: type, prompt: str, node: str):
@@ -87,7 +96,7 @@ def parse_input(text: str, llm=None) -> SetRequest:
 
 def explain_set(
     path: SetPath,
-    unresolved: list[TrackRef],
+    unresolved: list[UnresolvedTrack],
     omitted: list[TrackRef] | None = None,
     llm=None,
 ) -> SetResult:
@@ -121,10 +130,25 @@ def explain_set(
     if omitted:
         names = ", ".join(f"{r.artist} - {r.title}" for r in omitted)
         omitted_note = f"\n\n(Left out of the set, though resolved fine: {names}.)"
+    # Only add this line (and its tokens) when there's something to say --
+    # most requests resolve every track, so this costs nothing then. The
+    # reason text comes from UnresolvedTrack.message (deterministic, code-set)
+    # so the LLM only ever paraphrases it, never invents its own reason.
+    unresolved_note = ""
+    if unresolved:
+        names = ", ".join(f"{u.artist} - {u.title} ({u.message})" for u in unresolved)
+        unresolved_note = (
+            f"\n\n(Could not be resolved and are not in the set: {names}.)"
+        )
     out = _invoke_structured(
         llm,
         _Explanations,
-        EXPLAIN_PROMPT.format(n=len(pairs), tracks=lines, omitted_note=omitted_note),
+        EXPLAIN_PROMPT.format(
+            n=len(pairs),
+            tracks=lines,
+            omitted_note=omitted_note,
+            unresolved_note=unresolved_note,
+        ),
         node="explain_set",
     )
     raw_explanations = out.explanations or []

@@ -1,7 +1,7 @@
 import pytest
 
 from musicagent.llm import LLMOutputError, _Explanations, explain_set, parse_input
-from musicagent.models import SetPath, SetRequest, Track, TrackRef
+from musicagent.models import SetPath, SetRequest, Track, TrackRef, UnresolvedTrack
 
 
 class FakeLLM:
@@ -136,15 +136,49 @@ def test_explain_set_empty_path():
 
 def test_explain_set_preserves_unresolved():
     """Test that unresolved passed in is carried through unchanged."""
-    unresolved_refs = [TrackRef(artist="x", title="y"), TrackRef(artist="p", title="q")]
+    unresolved_tracks = [
+        UnresolvedTrack(artist="x", title="y", reason="not_found", message="not found"),
+        UnresolvedTrack(artist="p", title="q", reason="no_key", message="no key"),
+    ]
     tracks = [
         Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A"),
         Track(ref=TrackRef(artist="b", title="t2"), bpm=128, camelot="9A"),
     ]
     path = SetPath(tracks=tracks, edge_scores=[0.9])
     fake = FakeLLM(_Explanations(explanations=["smooth"], summary="nice set"))
-    result = explain_set(path, unresolved=unresolved_refs, llm=fake)
-    assert result.unresolved == unresolved_refs
+    result = explain_set(path, unresolved=unresolved_tracks, llm=fake)
+    assert result.unresolved == unresolved_tracks
+
+
+def test_explain_set_mentions_unresolved_tracks_in_prompt_only_when_present():
+    """The unresolved-tracks note is only added to the prompt when there's
+    something to say, and uses the deterministic message rather than letting
+    the LLM invent its own reason."""
+    tracks = [
+        Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A"),
+        Track(ref=TrackRef(artist="b", title="t2"), bpm=128, camelot="9A"),
+    ]
+    path = SetPath(tracks=tracks, edge_scores=[0.9])
+
+    recorder = RecordingLLM(_Explanations(explanations=["smooth"], summary="nice"))
+    explain_set(path, unresolved=[], llm=recorder)
+    assert "ghost" not in recorder.prompts[0]
+
+    recorder2 = RecordingLLM(_Explanations(explanations=["smooth"], summary="nice"))
+    explain_set(
+        path,
+        unresolved=[
+            UnresolvedTrack(
+                artist="c",
+                title="ghost",
+                reason="not_found",
+                message="No provider recognised this track.",
+            )
+        ],
+        llm=recorder2,
+    )
+    assert "ghost" in recorder2.prompts[0]
+    assert "No provider recognised this track." in recorder2.prompts[0]
 
 
 def test_explain_set_preserves_omitted_and_defaults_to_empty():

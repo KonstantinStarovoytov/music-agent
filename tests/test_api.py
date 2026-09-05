@@ -7,7 +7,7 @@ import pytest
 from musicagent.api import create_app
 from musicagent.db import TrackCache, get_engine, init_db
 from musicagent.llm import _Explanations
-from musicagent.models import SetRequest, Track, TrackRef
+from musicagent.models import SetRequest, Track, TrackRef, UnresolvedTrack
 from tests.test_graph import FakeLLM
 
 
@@ -241,7 +241,16 @@ async def test_track_list_over_cap_is_truncated_with_notice(monkeypatch):
     async def fake_enrich_all(refs, cache):
         calls["refs"] = list(refs)
         tracks = [Track(ref=r, bpm=120, camelot="8A", energy=0.5) for r in refs[:2]]
-        return tracks, [r for r in refs[2:]]
+        unresolved = [
+            UnresolvedTrack(
+                artist=r.artist,
+                title=r.title,
+                reason="not_found",
+                message="No provider recognised this track.",
+            )
+            for r in refs[2:]
+        ]
+        return tracks, unresolved
 
     monkeypatch.setattr("musicagent.graph.enrich_all", fake_enrich_all)
 
@@ -257,6 +266,15 @@ async def test_track_list_over_cap_is_truncated_with_notice(monkeypatch):
         final = [line for line in body.splitlines() if line.startswith("data: {")][-1]
         payload = json.loads(final.removeprefix("data: "))
         assert payload.get("notice")
+
+        # The API payload must carry artist, title and reason for each
+        # unresolved entry, not just a bare artist/title pair.
+        unresolved_payload = payload["result"]["unresolved"]
+        assert len(unresolved_payload) == 28
+        for entry in unresolved_payload:
+            assert entry["artist"] and entry["title"]
+            assert entry["reason"] == "not_found"
+            assert entry["message"]
 
         # The notice must be persisted with the saved set, not just streamed
         # once, so GET /sets/{id} replays it too.

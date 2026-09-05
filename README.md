@@ -50,10 +50,10 @@ A five-node LangGraph pipeline, traced end-to-end with Langfuse:
 | Node | Kind | Contract |
 |---|---|---|
 | `parse_input` | LLM | free text → `SetRequest{tracks, duration_min?, energy_shape}` |
-| `enrich_tracks` | code, parallel | `list[TrackRef]` → `list[Track]` (+ `unresolved`) |
+| `enrich_tracks` | code, parallel | `list[TrackRef]` → `list[Track]` (+ `unresolved: list[UnresolvedTrack]`) |
 | `build_transition_graph` | pure Python | `list[Track]` → `TransitionGraph{edges: (a, b, score)}` |
 | `find_set_path` | pure Python | `TransitionGraph` + `energy_shape` → `SetPath` (ordered tracks + per-edge scores) |
-| `explain_set` | LLM | `SetPath` → `SetResult{transitions: [{from, to, explanation}], summary}` |
+| `explain_set` | LLM | `SetPath` → `SetResult{transitions: [{from, to, explanation}], summary, unresolved, omitted}` |
 
 All contracts are Pydantic models in `src/musicagent/models.py`; the
 LangGraph state schema (`SetState` in `src/musicagent/graph.py`) mirrors this
@@ -118,8 +118,11 @@ provider (the others stay fully concurrent); see Limitations below for what
 that costs in latency. Every external call has a timeout and retries.
 Results are cached in the `tracks` table (Postgres, or SQLite locally); a
 cache hit skips all external calls. Tracks that can't be resolved are
-marked `unresolved`, excluded from the graph, and reported back in the
-response instead of silently dropped.
+reported back in `unresolved` instead of silently dropped, each with a
+machine-readable `reason` (`not_found`, `no_key`, `no_bpm`, `timeout`, or
+`error`) plus a human-readable `message` — see
+[How to read a response](#how-to-read-a-response) below for the difference
+between `unresolved` and `omitted`.
 
 ## Tech stack
 
@@ -145,7 +148,7 @@ cp .env.example .env       # fill in keys — see table below
 ### Run the tests (no keys needed)
 
 ```bash
-uv run pytest        # 158 tests, no network/LLM calls — all pure Python + stubs
+uv run pytest        # 184 tests, no network/LLM calls — all pure Python + stubs
 uv run ruff check .   # lint
 ```
 
@@ -177,12 +180,15 @@ Once `.env` is filled in (`OPENAI_API_KEY` or a Luna endpoint, and either a
 uv run uvicorn --factory musicagent.api:get_app --port 8123
 ```
 
-`POST /sets` streams progress over SSE and ends with a `SetResult`:
+`POST /sets` streams progress over SSE and ends with a `SetResult`. The
+tracks below are verified against the live Deezer/audio-analysis cascade
+(4/4 resolved in ~3.4s) — unlike a made-up track list, this one actually
+comes back with a full set instead of an empty one:
 
 ```bash
 curl -N -X POST http://127.0.0.1:8123/sets \
   -H 'Content-Type: application/json' \
-  -d '{"text": "Build me a peak-time set from: Adriatique - Los Angeles, Tale Of Us - Yang, Massano - Hoshi"}'
+  -d '{"text": "Build me a peak-time set from: Adriatique - Deep In The Three, Tale Of Us - Astral, Massano - The Feeling, Innellea - Downfall"}'
 ```
 
 ```
@@ -202,7 +208,7 @@ event: progress
 data: explain_set
 
 event: result
-data: {"set_id": "…", "result": {"transitions": [...], "summary": "..."}}
+data: {"set_id": "…", "result": {"transitions": [...], "summary": "...", "unresolved": [], "omitted": []}}
 ```
 
 Replay a saved set:
@@ -213,6 +219,40 @@ curl -s http://127.0.0.1:8123/sets/<set_id>
 
 If Langfuse env vars are set, every run also produces a trace at
 `LANGFUSE_HOST` (node-level spans for the whole graph).
+
+### How to read a response
+
+`SetResult` (the `result` field of the final SSE event, and of `GET
+/sets/{id}`) has two fields that are easy to conflate but mean different
+things:
+
+- **`unresolved`** — tracks that never became usable `Track`s at all: no
+  provider combination supplied both a tempo and a musical key (or the
+  per-track lookup errored or timed out) within the graph's enrichment
+  step, so they never even entered the transition graph. Each entry is:
+
+  ```json
+  {"artist": "...", "title": "...", "reason": "no_key", "message": "Found the track and its tempo, but no provider supplied a musical key."}
+  ```
+
+  `reason` is one of a fixed set — `not_found` (no provider recognised the
+  track at all), `no_key` (tempo known, key unknown), `no_bpm` (key known,
+  tempo unknown), `timeout` (the per-track deadline expired), `error` (an
+  unexpected failure) — so a client can branch on it programmatically;
+  `message` is the same information as a sentence for display.
+- **`omitted`** — the opposite case: tracks that enriched just fine (tempo
+  and key both known) but simply didn't end up in the final path, either
+  because the pathfinder found no harmonically/BPM-compatible slot for them
+  or because they were trimmed from the end to fit a requested
+  `duration_min`. These are plain `{"artist": ..., "title": ...}` pairs, no
+  reason needed — the track is fine, it just isn't in this particular set.
+
+In short: a track in `unresolved` means "the agent couldn't figure out what
+this track even sounds like"; a track in `omitted` means "the agent
+understood this track fine, it just didn't fit here." The `explain_set`
+summary also mentions both in plain language, but `unresolved`/`omitted`
+in the payload are the deterministic, code-produced source of truth — the
+LLM never invents or overrides a `reason`.
 
 ## Environment variables
 

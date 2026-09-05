@@ -8,6 +8,23 @@ class TrackRef(BaseModel):
     title: str
 
 
+class UnresolvedTrack(BaseModel):
+    """A requested track that never became a usable `Track`, with a
+    machine-readable reason plus a human-readable sentence explaining it
+    (surfaced to the user via the API and, in plain language, the
+    explain_set summary)."""
+
+    artist: str
+    title: str
+    # not_found: no provider recognised the track at all.
+    # no_key: bpm was found but no provider supplied a musical key.
+    # no_bpm: a musical key was found but no provider supplied a tempo.
+    # timeout: the per-track deadline (ENRICH_DEADLINE_S) expired first.
+    # error: an unexpected exception occurred while enriching this track.
+    reason: Literal["not_found", "no_key", "no_bpm", "timeout", "error"]
+    message: str
+
+
 class Track(BaseModel):
     ref: TrackRef
     bpm: float
@@ -51,7 +68,7 @@ class Transition(BaseModel):
 class SetResult(BaseModel):
     transitions: list[Transition]
     summary: str
-    unresolved: list[TrackRef] = []
+    unresolved: list[UnresolvedTrack] = []
     # Tracks that enriched fine (so they're not in `unresolved`) but ended up
     # with no place in the final path -- either no compatible edge to any
     # other track, or trimmed from the end to fit a requested duration_min.

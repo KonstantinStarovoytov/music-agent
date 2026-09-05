@@ -8,7 +8,7 @@ import respx
 import musicagent.enrichment as enrichment_mod
 from musicagent.db import TrackCache, get_engine, init_db
 from musicagent.enrichment import enrich_all, enrich_one
-from musicagent.models import Track, TrackRef
+from musicagent.models import Track, TrackRef, UnresolvedTrack
 
 # Search hit shape verified against the live api.deezer.com/search endpoint:
 # a hit carries only album, artist, duration, explicit_*, id, isrc, link,
@@ -81,6 +81,78 @@ async def test_unresolvable_goes_to_unresolved():
         [TrackRef(artist="x", title="y")], TrackCache(engine)
     )
     assert resolved == [] and len(unresolved) == 1
+    assert unresolved[0].artist == "x" and unresolved[0].title == "y"
+    assert unresolved[0].reason == "not_found"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_no_bpm_reason_when_key_found_but_no_tempo(monkeypatch):
+    """GetSongBPM supplying a key but no tempo, with nothing else supplying a
+    tempo, must be reported unresolved with reason "no_bpm" (key known, tempo
+    unknown) -- the mirror image of the "no_key" case."""
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json={"data": []})
+    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(
+        json={"search": [{"key_of": "Am"}]}
+    )
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(json={"recordings": []})
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert isinstance(track, UnresolvedTrack) and track.reason == "no_bpm"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_batch_guarantee_one_of_each_reason_alongside_a_resolved_track(
+    monkeypatch,
+):
+    """The batch guarantee holds across every reason at once: one track for
+    each of not_found/no_key/no_bpm/timeout/error, plus one that resolves
+    normally -- none of them should affect any other's outcome."""
+    monkeypatch.setattr(enrichment_mod, "ENRICH_DEADLINE_S", 0.05)
+
+    good_ref = TrackRef(artist="Bicep", title="Glue")
+    not_found_ref = TrackRef(artist="Nobody", title="Nothing")
+    no_key_ref = TrackRef(artist="HasBpm", title="NoKey")
+    no_bpm_ref = TrackRef(artist="HasKey", title="NoBpm")
+    timeout_ref = TrackRef(artist="Hangs", title="Forever")
+    error_ref = TrackRef(artist="Boom", title="Crash")
+
+    good_track = Track(ref=good_ref, bpm=120, camelot="8A", source="deezer")
+
+    async def fake_inner(ref, client, cache):
+        if ref == good_ref:
+            return good_track
+        if ref == not_found_ref:
+            return enrichment_mod._unresolved(ref, "not_found")
+        if ref == no_key_ref:
+            return enrichment_mod._unresolved(ref, "no_key")
+        if ref == no_bpm_ref:
+            return enrichment_mod._unresolved(ref, "no_bpm")
+        if ref == timeout_ref:
+            await asyncio.Event().wait()  # never returns; deadline cancels it
+        if ref == error_ref:
+            raise RuntimeError("boom: unexpected bug in provider path")
+        raise AssertionError(f"unexpected ref {ref}")
+
+    monkeypatch.setattr(enrichment_mod, "_enrich_one_inner", fake_inner)
+
+    resolved, unresolved = await enrich_all(
+        [good_ref, not_found_ref, no_key_ref, no_bpm_ref, timeout_ref, error_ref],
+        cache=None,
+    )
+
+    assert len(resolved) == 1 and resolved[0].ref == good_ref
+    by_ref = {(u.artist, u.title): u.reason for u in unresolved}
+    assert by_ref == {
+        (not_found_ref.artist, not_found_ref.title): "not_found",
+        (no_key_ref.artist, no_key_ref.title): "no_key",
+        (no_bpm_ref.artist, no_bpm_ref.title): "no_bpm",
+        (timeout_ref.artist, timeout_ref.title): "timeout",
+        (error_ref.artist, error_ref.title): "error",
+    }
 
 
 @pytest.mark.asyncio
@@ -146,7 +218,7 @@ async def test_all_providers_fail_marks_unresolved_not_crash():
         track = await enrich_one(
             TrackRef(artist="Bicep", title="Glue"), client, cache=None
         )
-    assert track is None
+    assert isinstance(track, UnresolvedTrack) and track.reason == "not_found"
 
 
 @pytest.mark.asyncio
@@ -174,12 +246,21 @@ async def test_enrich_all_partial_failure_does_not_fail_batch():
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
+    # bad_ref's own path falls through to the MusicBrainz fallback (Deezer and
+    # GSB both empty for it); stub it as "no recordings" so the track ends up
+    # legitimately unresolved (reason not_found) instead of erroring out on an
+    # unmocked route.
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(json={"recordings": []})
 
     engine = get_engine("sqlite:///:memory:")
     init_db(engine)
     resolved, unresolved = await enrich_all([good_ref, bad_ref], TrackCache(engine))
     assert len(resolved) == 1 and resolved[0].bpm == 126.0
-    assert unresolved == [bad_ref]
+    assert len(unresolved) == 1
+    assert (
+        unresolved[0].artist == bad_ref.artist and unresolved[0].title == bad_ref.title
+    )
+    assert unresolved[0].reason == "not_found"
 
 
 @pytest.mark.asyncio
@@ -198,8 +279,9 @@ async def test_missing_getsongbpm_key_skips_provider_without_crash(monkeypatch):
     assert gsb_route.call_count == 0
     # Deezer alone never supplies a Camelot key, GSB is skipped, and
     # MusicBrainz finds no recordings -> unresolved, but critically: no
-    # exception was raised.
-    assert track is None
+    # exception was raised. Deezer did supply a bpm, so the reason is
+    # "no_key" rather than "not_found".
+    assert isinstance(track, UnresolvedTrack) and track.reason == "no_key"
 
 
 @pytest.mark.asyncio
@@ -359,7 +441,11 @@ async def test_enrich_all_survives_internal_exception_in_one_track(monkeypatch):
     monkeypatch.setattr(enrichment_mod, "_enrich_one_inner", fake_inner)
 
     resolved, unresolved = await enrich_all([good_ref, bad_ref, other_ref], cache=None)
-    assert unresolved == [bad_ref]
+    assert len(unresolved) == 1
+    assert (
+        unresolved[0].artist == bad_ref.artist and unresolved[0].title == bad_ref.title
+    )
+    assert unresolved[0].reason == "error"
     resolved_refs = [t.ref for t in resolved]
     assert good_ref in resolved_refs and other_ref in resolved_refs
     assert len(resolved) == 2
@@ -509,13 +595,14 @@ async def test_hanging_track_times_out_and_is_reported_unresolved(monkeypatch):
         track = await enrich_one(
             TrackRef(artist="Bicep", title="Glue"), client, cache=None
         )
-    assert track is None
+    assert isinstance(track, UnresolvedTrack) and track.reason == "timeout"
 
     resolved, unresolved = await enrich_all(
         [TrackRef(artist="Bicep", title="Glue")], cache=None
     )
     assert resolved == []
     assert len(unresolved) == 1
+    assert unresolved[0].reason == "timeout"
 
 
 # --- Finding 2c: bounded enrichment fan-out -----------------------------------
@@ -632,7 +719,7 @@ async def test_musicbrainz_no_recordings_skips_acousticbrainz_call(monkeypatch):
         track = await enrich_one(
             TrackRef(artist="Bicep", title="Glue"), client, cache=None
         )
-    assert track is None
+    assert isinstance(track, UnresolvedTrack) and track.reason == "not_found"
     assert ab_route.call_count == 0
 
 
@@ -652,7 +739,7 @@ async def test_acousticbrainz_unparseable_key_falls_back_to_unresolved(monkeypat
         track = await enrich_one(
             TrackRef(artist="Bicep", title="Glue"), client, cache=None
         )
-    assert track is None
+    assert isinstance(track, UnresolvedTrack) and track.reason == "no_key"
 
 
 @pytest.mark.asyncio
@@ -916,7 +1003,9 @@ async def test_audio_analysis_oversized_preview_rejected_without_analysis(
         track = await enrich_one(
             TrackRef(artist="Bicep", title="Glue"), client, cache=None
         )
-    assert track is None  # no camelot from anywhere: audio rejected, MB empty
+    # no camelot from anywhere: audio rejected, MB empty -- but Deezer did
+    # supply a bpm, so this is "no_key", not "not_found".
+    assert isinstance(track, UnresolvedTrack) and track.reason == "no_key"
 
 
 @pytest.mark.asyncio

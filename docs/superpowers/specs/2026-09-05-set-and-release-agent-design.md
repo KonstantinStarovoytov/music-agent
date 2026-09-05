@@ -39,14 +39,23 @@ parse_input → enrich_tracks → build_transition_graph → find_set_path → e
 | Node | Kind | Contract (in → out) |
 |---|---|---|
 | parse_input | LLM | free text → `SetRequest{tracks, duration_min?, energy_shape}` + optional `notice` string in state (truncation msg if needed); dedupes refs on normalized (artist, title), caps at MAX_TRACKS (30) |
-| enrich_tracks | code, parallel | `list[TrackRef]` → `list[Track]` (+ `unresolved: list[TrackRef]`) |
+| enrich_tracks | code, parallel | `list[TrackRef]` → `list[Track]` (+ `unresolved: list[UnresolvedTrack]`) |
 | build_transition_graph | pure Python | `list[Track]` → `TransitionGraph{edges: (a, b, score)}` |
 | find_set_path | pure Python | `TransitionGraph` + `energy_shape` → `SetPath{ordered tracks, per-edge scores}`, followed by a duration trim honouring `duration_min` (keeping a floor of 2 tracks) |
-| explain_set | LLM | `SetPath` → `SetResult{transitions: [{from, to, explanation}], summary, unresolved, omitted}` |
+| explain_set | LLM | `SetPath` → `SetResult{transitions: [{from, to, explanation}], summary, unresolved: list[UnresolvedTrack], omitted}` |
 
 `omitted` holds tracks that enriched fine but were not placed in the final
 path: those trimmed to honour `duration_min`, plus any the pathfinder itself
-left out.
+left out. `unresolved` holds tracks that never became a usable `Track` at
+all -- each entry is an `UnresolvedTrack{artist, title, reason, message}`,
+where `reason` is one of `not_found` (no provider recognised the track),
+`no_key` (bpm known, no key), `no_bpm` (key known, no bpm), `timeout` (the
+per-track `ENRICH_DEADLINE_S` deadline expired), or `error` (an unexpected
+exception during enrichment). `message` is a human-readable sentence for the
+same reason. This is the key distinction for API consumers: `unresolved`
+tracks were never enriched and never entered the transition graph at all,
+while `omitted` tracks enriched fine and were simply left out of the final
+path.
 
 All contracts are Pydantic models in `src/musicagent/models.py`. State schema
 in code must match this table (enforced by spec-sync skill).
@@ -149,8 +158,11 @@ batch of tracks that all need the MusicBrainz fallback pays roughly
 1 second of extra latency per track for that fallback alone (see README).
 
 Results cached in `tracks` table; cache hit skips external calls.
-Unresolvable tracks are marked `unresolved`, excluded from the graph, and
-reported in the response.
+Unresolvable tracks are reported in `unresolved` with a machine-readable
+`reason` (see §3) and excluded from the transition graph; `enrich_all`
+guarantees one bad track never fails the whole batch, mapping any exception
+that escapes an individual track's enrichment to `reason: error` (a
+`TimeoutError` specifically to `reason: timeout`).
 
 ## 4. Data model (Supabase Postgres)
 
