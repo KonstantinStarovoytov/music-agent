@@ -9,7 +9,11 @@ from musicagent.models import Track, TrackRef
 
 TIMEOUT = 10.0
 RETRIES = 2
-ENRICH_DEADLINE_S = 25.0
+# Per-track deadline. Kept short because ENRICH_CONCURRENCY tracks run at once
+# inside a single SSE request with its own overall deadline (see
+# OVERALL_DEADLINE_S in api.py) -- 30 tracks / 8 concurrency ~= 4 batches, so
+# a large 25s-per-track deadline could alone blow well past that budget.
+ENRICH_DEADLINE_S = 10.0
 ENRICH_CONCURRENCY = 8
 
 

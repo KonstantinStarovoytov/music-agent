@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -59,6 +60,9 @@ async def test_get_set_roundtrip():
     payload = got.json()
     assert payload["set_id"] == set_id
     assert payload["result"]["summary"] == "ok"
+    # The truncation notice (None here, since this request is under the cap)
+    # is persisted with the saved set and replayed on GET.
+    assert payload["request"]["notice"] is None
 
 
 class FailingLLM:
@@ -142,8 +146,22 @@ async def test_generic_exception_mid_run_streams_error_event_not_500(monkeypatch
     assert "unexpected failure detail" not in body
 
 
+_ENV_VARS_USED_BY_APP = [
+    "SITE_ORIGIN",
+    "DATABASE_URL",
+    "LANGFUSE_SECRET_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "GETSONGBPM_API_KEY",
+    "LASTFM_API_KEY",
+]
+
+
 def test_create_app_requires_no_env_vars(monkeypatch):
-    monkeypatch.setattr("os.environ", {}, raising=False)
+    for name in _ENV_VARS_USED_BY_APP:
+        monkeypatch.delenv(name, raising=False)
     engine = get_engine("sqlite:///:memory:")
     app = create_app(engine=engine, llm=FakeLLM())
     assert app is not None
@@ -159,6 +177,23 @@ async def test_cors_allows_configured_site_origin(monkeypatch):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/health", headers={"Origin": "https://example.com"})
     assert resp.headers["access-control-allow-origin"] == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_cors_closed_by_default_without_site_origin(monkeypatch):
+    """CORS must fail closed (no cross-origin access allowed) rather than open
+    to '*' when SITE_ORIGIN is unset -- this is a public unauthenticated API."""
+    monkeypatch.delenv("SITE_ORIGIN", raising=False)
+    engine = get_engine("sqlite:///:memory:")
+    init_db(engine)
+    app = create_app(engine=engine, llm=FakeLLM())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/health",
+            headers={"Origin": "https://evil.example"},
+        )
+    assert "access-control-allow-origin" not in resp.headers
 
 
 class BoomIfInvokedLLM:
@@ -214,16 +249,19 @@ async def test_track_list_over_cap_is_truncated_with_notice(monkeypatch):
     init_db(engine)
     app = create_app(engine=engine, llm=ManyTracksLLM())
     transport = httpx.ASGITransport(app=app)
-    async with (
-        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
-        client.stream("POST", "/sets", json={"text": "many tracks"}) as r,
-    ):
-        body = "".join([chunk async for chunk in r.aiter_text()])
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with client.stream("POST", "/sets", json={"text": "many tracks"}) as r:
+            body = "".join([chunk async for chunk in r.aiter_text()])
 
-    assert len(calls["refs"]) == 30
-    final = [line for line in body.splitlines() if line.startswith("data: {")][-1]
-    payload = json.loads(final.removeprefix("data: "))
-    assert payload.get("notice")
+        assert len(calls["refs"]) == 30
+        final = [line for line in body.splitlines() if line.startswith("data: {")][-1]
+        payload = json.loads(final.removeprefix("data: "))
+        assert payload.get("notice")
+
+        # The notice must be persisted with the saved set, not just streamed
+        # once, so GET /sets/{id} replays it too.
+        got = await client.get(f"/sets/{payload['set_id']}")
+    assert got.json()["request"]["notice"] == payload["notice"]
 
 
 @pytest.mark.asyncio
@@ -249,8 +287,82 @@ async def test_track_list_under_cap_has_no_notice(monkeypatch):
     assert "notice" not in payload
 
 
+## test_client_disconnect_mid_stream_does_not_raise was removed here: it had
+## no assertion, and because httpx.ASGITransport fully buffers the ASGI
+## response before the client reads it, breaking out of `aiter_text()` early
+## never actually disconnects anything server-side -- the generator has
+## already run to completion by the time the test's `break` executes. It
+## tested nothing. A genuine disconnect test would need a transport that
+## streams incrementally (e.g. a real uvicorn server + a raw socket client),
+## which is a bigger lift than this ticket's scope; not attempted here.
+
+
 @pytest.mark.asyncio
-async def test_client_disconnect_mid_stream_does_not_raise():
+async def test_rate_limit_returns_429_after_max_requests_per_minute():
+    """POST /sets is rate limited per client host; the request past
+    RATE_LIMIT_MAX_REQUESTS within the window must be rejected with 429
+    before any graph work runs."""
+    from musicagent.api import RATE_LIMIT_MAX_REQUESTS
+
+    engine = get_engine("sqlite:///:memory:")
+    init_db(engine)
+    cache = TrackCache(engine)
+    cache.put(
+        Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A", energy=0.3)
+    )
+    cache.put(
+        Track(ref=TrackRef(artist="b", title="t2"), bpm=128, camelot="9A", energy=0.7)
+    )
+    app = create_app(engine=engine, llm=FakeLLM())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for _ in range(RATE_LIMIT_MAX_REQUESTS):
+            resp = await client.post("/sets", json={"text": "a t1, b t2"})
+            assert resp.status_code == 200
+        resp = await client.post("/sets", json={"text": "a t1, b t2"})
+    assert resp.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_overall_timeout_streams_error_event_not_hang(monkeypatch):
+    """If the whole graph run exceeds OVERALL_DEADLINE_S, the stream must end
+    with a generic error event rather than hang or crash silently."""
+    monkeypatch.setattr("musicagent.api.OVERALL_DEADLINE_S", 0.01)
+
+    async def slow_enrich_all(refs, cache):
+        await asyncio.sleep(1)
+        return [], []
+
+    monkeypatch.setattr("musicagent.graph.enrich_all", slow_enrich_all)
+
+    engine = get_engine("sqlite:///:memory:")
+    init_db(engine)
+    app = create_app(engine=engine, llm=FakeLLM())
+    transport = httpx.ASGITransport(app=app)
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+        client.stream("POST", "/sets", json={"text": "a t1, b t2"}) as r,
+    ):
+        body = "".join([chunk async for chunk in r.aiter_text()])
+
+    from musicagent.api import GENERIC_ERROR_MESSAGE
+
+    assert "event: error" in body
+    assert GENERIC_ERROR_MESSAGE in body
+    assert "event: result" not in body
+
+
+@pytest.mark.asyncio
+async def test_store_save_failure_streams_error_event_not_crash(monkeypatch):
+    """A DB blip on store.save() (result serialization + persistence, which
+    used to sit outside the SSE error handling) must still produce a
+    terminal error event instead of silently killing the stream."""
+
+    def boom_save(self, request_json, result):
+        raise RuntimeError("db blip: connection reset")
+
+    monkeypatch.setattr("musicagent.db.SetStore.save", boom_save)
+
     engine = get_engine("sqlite:///:memory:")
     init_db(engine)
     cache = TrackCache(engine)
@@ -266,7 +378,11 @@ async def test_client_disconnect_mid_stream_does_not_raise():
         httpx.AsyncClient(transport=transport, base_url="http://test") as client,
         client.stream("POST", "/sets", json={"text": "a t1, b t2"}) as r,
     ):
-        async for _chunk in r.aiter_text():
-            break  # simulate the client disconnecting after the first event
-    # Reaching here without an exception propagating out of the ASGI app is the
-    # assertion: an early client disconnect must not surface as a server error.
+        body = "".join([chunk async for chunk in r.aiter_text()])
+
+    from musicagent.api import GENERIC_ERROR_MESSAGE
+
+    assert "event: error" in body
+    assert GENERIC_ERROR_MESSAGE in body
+    assert "event: result" not in body
+    assert "db blip" not in body
