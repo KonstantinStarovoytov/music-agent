@@ -26,8 +26,9 @@ explaining decisions); all music math is deterministic, tested Python.
 - LLM: OpenAI (or Luna via `OPENAI_BASE_URL`); fallback Gemini/Groq free tier
 - Langfuse (cloud free tier) — tracing on every node
 - Supabase Postgres (free tier); pgvector enabled in phase 2
-- Music data (all free): Deezer → GetSongBPM → MusicBrainz/AcousticBrainz
-  (BPM/key cascade), Last.fm (tags, similar artists)
+- Music data (all free): Deezer → GetSongBPM (BPM/key cascade), Last.fm
+  (tags, similar artists); MusicBrainz/AcousticBrainz as a further BPM/key
+  fallback is deferred to phase 2
 
 ## 3. MVP architecture — Set Builder graph
 

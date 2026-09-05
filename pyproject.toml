@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "deepagents>=0.7.13",
+    "fastapi>=0.141.1",
     "httpx>=0.28.1",
     "langchain>=1.4.0",
     "langchain-community>=0.4.2",
@@ -18,10 +19,13 @@ dependencies = [
     "pydantic>=2.13.5",
     "python-dotenv>=1.2.3",
     "sqlalchemy>=2.0.52",
+    "sse-starlette>=3.4.10",
+    "uvicorn>=0.52.4",
 ]
 
 [dependency-groups]
 dev = [
+    "asgi-lifespan>=2.1.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "respx>=0.23.1",

@@ -105,10 +105,18 @@ def test_track_cache_put_upsert_via_direct_conflicting_insert():
     # Directly perform a second conflicting upsert against the same primary key,
     # bypassing cache.put's own delete/insert bookkeeping, as a concurrent writer would.
     insert = _upsert_insert(engine)
-    values = dict(
-        artist_key="bicep", title_key="glue", artist="Bicep", title="Glue",
-        bpm=999, camelot="9A", energy=0.1, duration_s=None, tags=[], source="concurrent",
-    )
+    values = {
+        "artist_key": "bicep",
+        "title_key": "glue",
+        "artist": "Bicep",
+        "title": "Glue",
+        "bpm": 999,
+        "camelot": "9A",
+        "energy": 0.1,
+        "duration_s": None,
+        "tags": [],
+        "source": "concurrent",
+    }
     stmt = insert(tracks_table).values(**values)
     stmt = stmt.on_conflict_do_update(
         index_elements=[tracks_table.c.artist_key, tracks_table.c.title_key],
@@ -131,7 +139,15 @@ def test_track_cache_empty_tags_and_none_duration():
     ref = TrackRef(artist="Test Artist", title="Test Track")
 
     # Create track with empty tags and None duration
-    original = Track(ref=ref, bpm=120, camelot="8A", energy=0.5, duration_s=None, tags=[], source="test")
+    original = Track(
+        ref=ref,
+        bpm=120,
+        camelot="8A",
+        energy=0.5,
+        duration_s=None,
+        tags=[],
+        source="test",
+    )
     cache.put(original)
 
     # Retrieve and verify fields match exactly

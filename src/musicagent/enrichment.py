@@ -111,7 +111,9 @@ async def _lastfm_tags(client: httpx.AsyncClient, ref: TrackRef) -> list[str]:
 _PROVIDER_NAMES = {_deezer: "deezer", _getsongbpm: "getsongbpm"}
 
 
-async def _enrich_one_inner(ref: TrackRef, client: httpx.AsyncClient, cache: TrackCache | None) -> Track | None:
+async def _enrich_one_inner(
+    ref: TrackRef, client: httpx.AsyncClient, cache: TrackCache | None
+) -> Track | None:
     merged: dict = {}
     # Which provider supplied the musically load-bearing fields, in the order
     # they were first set (so "source" reflects true provenance, never a
@@ -152,7 +154,9 @@ async def _enrich_one_inner(ref: TrackRef, client: httpx.AsyncClient, cache: Tra
     return track
 
 
-async def enrich_one(ref: TrackRef, client: httpx.AsyncClient, cache: TrackCache | None) -> Track | None:
+async def enrich_one(
+    ref: TrackRef, client: httpx.AsyncClient, cache: TrackCache | None
+) -> Track | None:
     """Resolve bpm/camelot/tags for a single track via the provider cascade
     (Deezer -> GetSongBPM), checking the cache first and writing back on success.
     Returns None (unresolved) if no provider combination yields both bpm and camelot,
@@ -161,8 +165,10 @@ async def enrich_one(ref: TrackRef, client: httpx.AsyncClient, cache: TrackCache
         return hit
 
     try:
-        return await asyncio.wait_for(_enrich_one_inner(ref, client, cache), timeout=ENRICH_DEADLINE_S)
-    except asyncio.TimeoutError:
+        return await asyncio.wait_for(
+            _enrich_one_inner(ref, client, cache), timeout=ENRICH_DEADLINE_S
+        )
+    except TimeoutError:
         return None
 
 
