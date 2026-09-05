@@ -20,11 +20,13 @@ MUSICBRAINZ_MIN_INTERVAL_S = 1.1
 MUSICBRAINZ_USER_AGENT = "musicagent/0.1 ( https://github.com/ )"
 _musicbrainz_lock = asyncio.Lock()
 _musicbrainz_last_request_at = 0.0
-# Per-track deadline. Kept short because ENRICH_CONCURRENCY tracks run at once
-# inside a single SSE request with its own overall deadline (see
-# OVERALL_DEADLINE_S in api.py) -- 30 tracks / 8 concurrency ~= 4 batches, so
-# a large 25s-per-track deadline could alone blow well past that budget.
-ENRICH_DEADLINE_S = 10.0
+# Per-track deadline. It is wall-clock, so it also covers the time a track
+# spends queued behind others for a MusicBrainz send slot: with the throttle
+# above, the Nth track in a batch waits ~N * MUSICBRAINZ_MIN_INTERVAL_S before
+# its own request even starts. Sized so a full MAX_TRACKS (30) request still
+# fits; the request as a whole is bounded separately by OVERALL_DEADLINE_S in
+# api.py, and a warm cache skips all of this.
+ENRICH_DEADLINE_S = 45.0
 ENRICH_CONCURRENCY = 8
 
 
@@ -120,18 +122,24 @@ async def _musicbrainz_search(client: httpx.AsyncClient, ref: TrackRef) -> list[
     candidates are tried together in one AcousticBrainz batch call."""
     global _musicbrainz_last_request_at
     query = f'artist:"{ref.artist}" AND recording:"{ref.title}"'
+    # Reserve this caller's send slot under the lock, then release it before
+    # sleeping and before the request itself. Holding the lock across the HTTP
+    # call would serialize whole request durations, not just space the sends
+    # one interval apart, and every queued track would pay for the ones ahead.
     async with _musicbrainz_lock:
-        now = time.monotonic()
-        wait = _musicbrainz_last_request_at + MUSICBRAINZ_MIN_INTERVAL_S - now
-        if wait > 0:
-            await asyncio.sleep(wait)
-        data = await _get_json(
-            client,
-            "https://musicbrainz.org/ws/2/recording",
-            params={"query": query, "fmt": "json", "limit": 15},
-            headers={"User-Agent": MUSICBRAINZ_USER_AGENT},
+        slot = max(
+            time.monotonic(), _musicbrainz_last_request_at + MUSICBRAINZ_MIN_INTERVAL_S
         )
-        _musicbrainz_last_request_at = time.monotonic()
+        _musicbrainz_last_request_at = slot
+    wait = slot - time.monotonic()
+    if wait > 0:
+        await asyncio.sleep(wait)
+    data = await _get_json(
+        client,
+        "https://musicbrainz.org/ws/2/recording",
+        params={"query": query, "fmt": "json", "limit": 15},
+        headers={"User-Agent": MUSICBRAINZ_USER_AGENT},
+    )
     recordings = (data or {}).get("recordings") or []
     return [r["id"] for r in recordings if isinstance(r, dict) and r.get("id")]
 
@@ -141,7 +149,12 @@ async def _musicbrainz_acousticbrainz(client: httpx.AsyncClient, ref: TrackRef) 
     candidate MBIDs, then a single batch AcousticBrainz lookup supplies key,
     bpm and an energy proxy for whichever of them were ever analysed
     (one-mbid-at-a-time lookups see roughly a 1/6 hit rate, hence the batch).
-    Only the first returned MBID with a `tonal` section is used."""
+
+    Several MBIDs of the same track may carry analyses that disagree — the key
+    is estimated from audio, not read from metadata — so the candidate with the
+    highest `key_strength` wins, ties broken by MBID for stability. Picking
+    whichever happened to come back first made the same track resolve to a
+    different key between runs."""
     mbids = await _musicbrainz_search(client, ref)
     if not mbids:
         return {}
@@ -154,15 +167,17 @@ async def _musicbrainz_acousticbrainz(client: httpx.AsyncClient, ref: TrackRef) 
     if not ab_data:
         return {}
 
-    doc = None
+    candidates = []
     for mbid in mbids:
         entry = ab_data.get(mbid)
         candidate = (entry or {}).get("0") if isinstance(entry, dict) else None
         if isinstance(candidate, dict) and isinstance(candidate.get("tonal"), dict):
-            doc = candidate
-            break
-    if doc is None:
+            strength = candidate["tonal"].get("key_strength")
+            strength = float(strength) if isinstance(strength, (int, float)) else 0.0
+            candidates.append((strength, mbid, candidate))
+    if not candidates:
         return {}
+    doc = max(candidates, key=lambda c: (c[0], c[1]))[2]
 
     out: dict = {}
     tonal = doc["tonal"]

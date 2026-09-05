@@ -37,10 +37,12 @@ GENERIC_ERROR_MESSAGE = "Something went wrong while building the set. Please try
 MAX_TEXT_LENGTH = 4000
 
 # Overall wall-clock budget for one /sets run (parse + enrich + path + explain).
-# Enrichment alone can take ENRICH_DEADLINE_S seconds per batch of
-# ENRICH_CONCURRENCY tracks; this is the outer backstop so a run can never
-# hang the SSE connection open indefinitely.
-OVERALL_DEADLINE_S = 60.0
+# Enrichment dominates it: MusicBrainz is throttled to one request per second,
+# so a cold-cache request near MAX_TRACKS spends ~35s just being paced, on top
+# of two LLM round trips. This is the outer backstop so a run can never hang
+# the SSE connection open indefinitely. Note some hosting proxies cut idle
+# streams earlier than this — progress events keep the stream from going idle.
+OVERALL_DEADLINE_S = 150.0
 
 # Rate limit for the public, unauthenticated POST /sets endpoint: each track
 # list triggers several outbound HTTP calls plus at least one LLM call, so
@@ -202,5 +204,13 @@ def get_app() -> FastAPI:
     """Lazy factory for prod: `uvicorn --factory musicagent.api:get_app`.
     Builds the app from environment on first call so the module stays
     importable (and side-effect free) with no env vars set.
+
+    Loads `.env` here rather than at import time: tests import this module
+    with a deliberately empty environment, and only the real entrypoint
+    should pick up developer credentials from disk. Real environment
+    variables win over the file.
     """
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
     return create_app()

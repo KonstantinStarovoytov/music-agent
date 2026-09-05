@@ -637,3 +637,36 @@ async def test_musicbrainz_throttle_enforces_minimum_interval(monkeypatch):
 
     assert len(timestamps) == 2
     assert timestamps[1] - timestamps[0] >= 0.2 - 0.02
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_acousticbrainz_picks_highest_key_strength_candidate(monkeypatch):
+    """Different MBIDs of one track carry independently estimated keys that can
+    disagree. The most confident analysis must win, so the same track does not
+    resolve to a different key from one run to the next."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    monkeypatch.setattr(enrichment_mod, "MUSICBRAINZ_MIN_INTERVAL_S", 0.0)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json={"data": []})
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(
+        json={"recordings": [{"id": "mbid-1"}, {"id": "mbid-2"}, {"id": "mbid-3"}]}
+    )
+    respx.get(url__regex=r"acousticbrainz\.org.*").respond(
+        json={
+            # first in order, but least confident -- must NOT be chosen
+            "mbid-1": {"0": _ab_doc(tonal={"key_key": "C", "key_scale": "major",
+                                           "key_strength": 0.30})},
+            "mbid-2": {"0": _ab_doc(tonal={"key_key": "F", "key_scale": "minor",
+                                           "key_strength": 0.91})},
+            "mbid-3": {"0": _ab_doc(tonal={"key_key": "G", "key_scale": "major",
+                                           "key_strength": 0.55})},
+        }
+    )
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(TrackRef(artist="A", title="B"), client, cache=None)
+    assert track is not None
+    assert track.camelot == "4A"  # F minor, from the 0.91-confidence analysis
+    assert track.key_confidence == pytest.approx(0.91)
