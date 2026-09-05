@@ -37,12 +37,20 @@ GENERIC_ERROR_MESSAGE = "Something went wrong while building the set. Please try
 MAX_TEXT_LENGTH = 4000
 
 # Overall wall-clock budget for one /sets run (parse + enrich + path + explain).
-# Enrichment dominates it: MusicBrainz is throttled to one request per second,
-# so a cold-cache request near MAX_TRACKS spends ~35s just being paced, on top
-# of two LLM round trips. This is the outer backstop so a run can never hang
-# the SSE connection open indefinitely. Note some hosting proxies cut idle
-# streams earlier than this — progress events keep the stream from going idle.
-OVERALL_DEADLINE_S = 150.0
+# Enrichment no longer needs the MusicBrainz-throttle-dominated margin this
+# used to be sized for: audio analysis of Deezer preview clips (see
+# musicagent/audio.py) is now consulted before MusicBrainz/AcousticBrainz and
+# resolves most tracks in ~1s each (download + decode + analyse), so
+# MusicBrainz is only a fallback for tracks Deezer never found at all.
+# Sized as enrichment's own worst case (ENRICH_DEADLINE_S = 55s, see
+# enrichment.py for that arithmetic) plus ~2x for the two LLM round trips
+# (parse_input, explain_set) at ~15s each in the worst case (slow provider,
+# one repair retry) plus ~20s of slack for the pure-Python graph/path nodes
+# and general overhead: 55 + 30 + 20 = 105s, rounded up to 110s. This is the
+# outer backstop so a run can never hang the SSE connection open indefinitely.
+# Note some hosting proxies cut idle streams earlier than this — progress
+# events keep the stream from going idle.
+OVERALL_DEADLINE_S = 110.0
 
 # Rate limit for the public, unauthenticated POST /sets endpoint: each track
 # list triggers several outbound HTTP calls plus at least one LLM call, so

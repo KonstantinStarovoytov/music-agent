@@ -73,8 +73,25 @@ network/LLM):
   doing two different jobs (local smoothness vs. overall arc).
 
 **Enrichment cascade** (`src/musicagent/enrichment.py`): per track, Deezer
-(no key required) → GetSongBPM → MusicBrainz/AcousticBrainz for BPM/key,
-with tags/genre from Last.fm. The cascade stops as soon as both are known.
+(no key required) → GetSongBPM → audio analysis of the Deezer preview clip
+(`src/musicagent/audio.py`) → MusicBrainz/AcousticBrainz for BPM/key, with
+tags/genre from Last.fm. The cascade stops as soon as both are known.
+
+Audio analysis exists because the metadata providers cover mainstream
+releases well but miss underground ones almost entirely — measured on a real
+15-track underground techno playlist, MusicBrainz/AcousticBrainz resolved
+0/15 and Deezer's metadata gave bpm for 7 tracks and never a key, but 13/15
+had a public preview clip on Deezer. Analysing that clip (via
+[essentia](https://essentia.upf.edu/)'s `KeyExtractor` + `RhythmExtractor2013`,
+after an `ffmpeg` decode to mono/44.1kHz wav) gives key, bpm, and an energy
+proxy for anything Deezer carries at all. It's optional at runtime — `essentia`
+is a separate `audio` dependency extra (not installed by default; importing
+it costs ~190MB RSS) and `ffmpeg` can't come from pip — so a deployment
+without either just runs on the metadata providers, no crash. Key detection
+this way is roughly 70-80% accurate, same as AcousticBrainz's, which is why
+`Track.key_confidence` is populated from it too. See Limitations below for
+the caveat on Deezer's terms of use.
+
 MusicBrainz/AcousticBrainz needs no API key: MusicBrainz recording search
 finds candidate MBIDs, then a single batch AcousticBrainz lookup (all
 candidate MBIDs in one request) supplies key, BPM, and an energy proxy for
@@ -112,7 +129,7 @@ cp .env.example .env       # fill in keys — see table below
 ### Run the tests (no keys needed)
 
 ```bash
-uv run pytest        # 151 tests, no network/LLM calls — all pure Python + stubs
+uv run pytest        # 158 tests, no network/LLM calls — all pure Python + stubs
 uv run ruff check .   # lint
 ```
 
@@ -199,31 +216,79 @@ From [`.env.example`](.env.example):
 | `GETSONGBPM_API_KEY` | for full enrichment | BPM/key fallback after Deezer (see limitations — currently unreliable) |
 | `SITE_ORIGIN` | recommended | Allows CORS from this origin; with none set, CORS is closed (no cross-origin access at all) |
 
-Deezer and MusicBrainz/AcousticBrainz need no key.
+Deezer and MusicBrainz/AcousticBrainz need no key. Audio analysis of Deezer
+preview clips needs no key either, but does need the `audio` extra
+(`uv sync --extra audio`) and an `ffmpeg` binary on `PATH` — see below.
+
+### Audio analysis extra (optional)
+
+```bash
+uv sync --extra audio   # installs essentia (~190MB RSS once imported)
+brew install ffmpeg     # or apt-get install ffmpeg, etc — not installable via pip
+```
+
+Without this extra and/or without `ffmpeg` on `PATH`, the audio-analysis
+provider silently contributes nothing (a single warning-level log line, not
+per track) and the cascade falls through to MusicBrainz/AcousticBrainz as
+before — the app runs fine either way. The provided `Dockerfile` installs
+both by default.
+
+### Running with Docker
+
+```bash
+docker build -t musicagent .
+docker run -p 8123:8123 -e DATABASE_URL=sqlite:////tmp/musicagent.db musicagent
+```
+
+The image installs `ffmpeg` and the `audio` extra, so the audio-analysis
+provider is available out of the box; supply the rest of the environment
+variables below (`OPENAI_API_KEY`, `DATABASE_URL` for Postgres, etc.) with
+`-e` or an env file as usual.
 
 ## Limitations (MVP)
 
-- The enrichment cascade is **Deezer → GetSongBPM → MusicBrainz/AcousticBrainz**,
-  with tags from Last.fm (spec §3). GetSongBPM in practice rarely contributes a
-  key: its API requires a public backlink to the site that isn't in place, so
-  that step is effectively skipped and MusicBrainz/AcousticBrainz carries most
-  of the key/BPM resolution today.
-- **Coverage is uneven by release type.** Measured against the live APIs:
-  6/6 resolved on a mainstream electronic/rock sample, but 0/15 on an
-  underground techno playlist — catalogued, released music resolves well;
-  small-label/underground tracks often aren't in Deezer, GetSongBPM, or
-  MusicBrainz/AcousticBrainz at all.
-- **Key detection is algorithmic, not ground truth.** AcousticBrainz's key
-  estimate is roughly 70-80% accurate, which is why `Track.key_confidence`
-  (from `tonal.key_strength`) is surfaced through to `explain_set` — the LLM
-  is asked to hedge the key claim when confidence is low rather than state
-  it flatly.
-- **MusicBrainz's rate limit adds latency.** It allows only 1 request/second
-  per client, enforced here by a module-level throttle on that provider
-  alone. On a cold cache, a 30-track request where every track needs the
-  MusicBrainz/AcousticBrainz fallback can take on the order of ~35s for
-  enrichment alone (30 tracks × ~1.1s throttle interval), even though the
-  other providers run fully concurrently.
+- The enrichment cascade is **Deezer → GetSongBPM → audio analysis of the
+  Deezer preview clip → MusicBrainz/AcousticBrainz**, with tags from Last.fm
+  (spec §3). GetSongBPM in practice rarely contributes a key: its API
+  requires a public backlink to the site that isn't in place, so that step is
+  effectively skipped.
+- **Coverage is uneven by release type, which is exactly why audio analysis
+  exists.** Measured against the live APIs on the same underground techno
+  playlist: 6/6 resolved on a mainstream electronic/rock sample via metadata
+  alone, but only 0/15 via MusicBrainz/AcousticBrainz on an underground
+  techno playlist and 7/15 via Deezer's own bpm field (never a key) — while
+  13/15 of those same tracks had a public Deezer preview clip, which audio
+  analysis can resolve key + bpm from. Catalogued, released music still
+  resolves fine from metadata alone; audio analysis is what closes most of
+  the gap for small-label/underground tracks that Deezer at least indexes
+  (has *some* metadata and a preview for) but never analysed itself.
+- **Audio analysis needs an optional dependency and a binary not installable
+  via pip.** `essentia` (~190MB RSS to import) is behind the `audio` extra,
+  and it needs `ffmpeg` on `PATH` to decode the mp3 preview. Both are
+  optional at runtime — missing either just disables this one provider (one
+  warning-level log line, not per track) and the cascade falls through to
+  MusicBrainz/AcousticBrainz as before. The provided `Dockerfile` installs
+  both.
+- **Key detection is algorithmic, not ground truth**, whichever provider
+  supplies it. Essentia's key estimate (from the preview clip) and
+  AcousticBrainz's (`tonal.key_strength`) are both roughly 70-80% accurate,
+  which is why `Track.key_confidence` is surfaced through to `explain_set`
+  either way — the LLM is asked to hedge the key claim when confidence is low
+  rather than state it flatly.
+- **Deezer's terms of use don't explicitly address analysing preview clips**
+  (as opposed to linking to or playing them). This MVP treats that as
+  acceptable for a non-commercial portfolio demo; it isn't a reviewed legal
+  position, and a production/commercial deployment should get its own read on
+  this before relying on the same approach.
+- **MusicBrainz's rate limit adds latency, but only for the tracks that reach
+  it.** It allows only 1 request/second per client, enforced here by a
+  module-level throttle on that provider alone. Audio analysis sits ahead of
+  it in the cascade and resolves most tracks Deezer has any record of at all
+  (~0.75s/track), so MusicBrainz/AcousticBrainz is now reached only for
+  tracks Deezer never found — but a cold-cache request where every track
+  falls all the way through can still take on the order of ~35s for
+  enrichment alone (30 tracks × ~1.1s throttle interval, the worst case),
+  even though every other provider runs fully concurrently.
 - **No auth** — the API is a public portfolio demo. `POST /sets` has a
   small in-process rate limit (5 requests/minute per client host); a real
   multi-instance deployment would still want rate limiting at the platform
@@ -233,8 +298,11 @@ Deezer and MusicBrainz/AcousticBrainz need no key.
 - Request body is capped at **4000 characters** of free text and the parsed
   track list is capped at **30 tracks** per request (excess tracks are
   truncated with a `notice` in the response, not rejected).
-- No audio file analysis and no Spotify integration by design (audio
-  features API closed to new apps since Nov 2024) — see spec §9.
+- No user-uploaded audio file analysis and no Spotify integration by design
+  (audio features API closed to new apps since Nov 2024) — see spec §9. The
+  only audio dependency in the MVP is the narrow, optional preview-clip
+  provider described above; there's no path for the user to upload or submit
+  their own audio.
 - A longer set always beats a shorter one in the pathfinder's search (it
   prefers path length over score, see `find_path`), so `energy_shape` is a
   preference that shapes *which* tracks and *what order*, not a guarantee

@@ -26,8 +26,35 @@ _musicbrainz_last_request_at = 0.0
 # its own request even starts. Sized so a full MAX_TRACKS (30) request still
 # fits; the request as a whole is bounded separately by OVERALL_DEADLINE_S in
 # api.py, and a warm cache skips all of this.
-ENRICH_DEADLINE_S = 45.0
+#
+# Arithmetic for the lowered value below: the audio-analysis path (now the
+# primary key/bpm source, see _audio) costs ~0.75s/track (download + decode +
+# analyse, measured), so a cold-cache batch that resolves entirely through it
+# finishes in a couple of seconds regardless of MAX_TRACKS. The MusicBrainz/
+# AcousticBrainz fallback is still needed for the tracks Deezer never found at
+# all (no preview to analyse), and it alone can cost ~MAX_TRACKS *
+# MUSICBRAINZ_MIN_INTERVAL_S ~= 30 * 1.1 ~= 33s if literally every track in a
+# full-size (30-track) request falls all the way through to it. 20s of
+# headroom on top of that covers per-track HTTP latency/retries, so 55s stays
+# comfortably above the worst case while being well below the old 45s+heavy-
+# margin figure that assumed AcousticBrainz was the *primary* path rather than
+# a rarely-hit fallback.
+ENRICH_DEADLINE_S = 55.0
 ENRICH_CONCURRENCY = 8
+
+# Preview clips are small (typically ~470KB); refuse anything drastically
+# larger rather than buffering an unbounded response in memory.
+MAX_PREVIEW_BYTES = 5 * 1024 * 1024
+
+# Analysis (ffmpeg decode + essentia) is blocking CPU work run via
+# asyncio.to_thread, gated by its own semaphore separate from
+# ENRICH_CONCURRENCY (8): that constant bounds concurrent *I/O-bound* per-track
+# pipelines (mostly waiting on HTTP), which is fine to set high, but letting 8
+# CPU-bound essentia analyses run at once on what is typically a single shared
+# vCPU (free-tier hosting) would thrash rather than speed anything up. Capped
+# much lower, independently of how many tracks are in flight overall.
+AUDIO_ANALYSIS_CONCURRENCY = 2
+_audio_semaphore = asyncio.Semaphore(AUDIO_ANALYSIS_CONCURRENCY)
 
 
 async def _get_json(client: httpx.AsyncClient, url: str, **kw) -> dict | None:
@@ -54,6 +81,34 @@ async def _get_json(client: httpx.AsyncClient, url: str, **kw) -> dict | None:
     return None
 
 
+async def _get_bytes(
+    client: httpx.AsyncClient, url: str, max_bytes: int = MAX_PREVIEW_BYTES
+) -> bytes | None:
+    """GET url and return the raw response body, retrying like _get_json but
+    without assuming a JSON payload (a preview clip is audio, not JSON, so
+    _get_json's r.json() parse doesn't fit). Streams the body so an
+    over-large response is rejected as soon as it exceeds max_bytes rather
+    than being fully buffered first; returns None on any transport/HTTP-status
+    error, or if the body exceeds max_bytes, after RETRIES retries."""
+    for attempt in range(RETRIES + 1):
+        try:
+            async with client.stream("GET", url, timeout=TIMEOUT) as r:
+                r.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in r.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        return None
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except httpx.HTTPError:
+            if attempt == RETRIES:
+                return None
+            await asyncio.sleep(0.5 * 2**attempt)
+    return None
+
+
 async def _deezer(client: httpx.AsyncClient, ref: TrackRef) -> dict:
     """Deezer is a two-step lookup: /search finds the track id (a search hit
     carries only album, artist, duration, explicit_*, id, isrc, link,
@@ -67,14 +122,20 @@ async def _deezer(client: httpx.AsyncClient, ref: TrackRef) -> dict:
         return {}
     hit = items[0]
     track_id = hit.get("id")
+    # The preview clip URL lives on the *search* hit, not the /track/{id}
+    # response -- captured here so the audio-analysis provider downstream can
+    # reuse it without searching Deezer a second time.
+    preview_url = hit.get("preview")
     if not track_id:
         return {}
 
     track_data = await _get_json(client, f"https://api.deezer.com/track/{track_id}")
     if not track_data:
-        return {}
+        return {"preview_url": preview_url} if preview_url else {}
 
     out: dict = {"duration_s": track_data.get("duration")}
+    if preview_url:
+        out["preview_url"] = preview_url
     # Deezer returns bpm=0 when the tempo is unknown; treat that like a
     # missing value so the cascade falls through to the next provider
     # instead of taking 0 BPM as a real reading.
@@ -112,6 +173,29 @@ async def _getsongbpm(client: httpx.AsyncClient, ref: TrackRef) -> dict:
         except ValueError:
             pass
     return out
+
+
+async def _audio(client: httpx.AsyncClient, preview_url: str | None) -> dict:
+    """Analyse the Deezer preview clip (if any) for key/bpm. Takes the
+    preview URL rather than a TrackRef -- unlike every other provider here --
+    because it was already extracted from _deezer's search hit above, and
+    re-searching Deezer just to get the same URL again would be wasteful.
+
+    Coverage argument (measured on a real underground-techno playlist, see
+    README/spec): MusicBrainz/AcousticBrainz resolved 0/15 tracks, Deezer
+    metadata supplied bpm for 7 and never a key, but 13/15 had a public
+    preview clip -- analysing it gives key + bpm for anything Deezer carries
+    at all, mainstream or not.
+    """
+    if not preview_url:
+        return {}
+    mp3_bytes = await _get_bytes(client, preview_url)
+    if not mp3_bytes:
+        return {}
+    async with _audio_semaphore:
+        from musicagent.audio import analyze_preview
+
+        return await asyncio.to_thread(analyze_preview, mp3_bytes)
 
 
 async def _musicbrainz_search(client: httpx.AsyncClient, ref: TrackRef) -> list[str]:
@@ -234,6 +318,7 @@ async def _lastfm_tags(client: httpx.AsyncClient, ref: TrackRef) -> list[str]:
 _PROVIDER_NAMES = {
     _deezer: "deezer",
     _getsongbpm: "getsongbpm",
+    _audio: "audio",
     _musicbrainz_acousticbrainz: "acousticbrainz",
 }
 
@@ -246,8 +331,17 @@ async def _enrich_one_inner(
     # they were first set (so "source" reflects true provenance, never a
     # provider that merely returned an incomplete hit).
     field_source: dict[str, str] = {}
-    for provider in (_deezer, _getsongbpm, _musicbrainz_acousticbrainz):
-        got = await provider(client, ref)
+    # Captured from _deezer's search hit (see _deezer) and threaded through to
+    # _audio below, which takes it directly instead of a TrackRef -- it has no
+    # need to search Deezer a second time for the same URL.
+    preview_url: str | None = None
+    for provider in (_deezer, _getsongbpm, _audio, _musicbrainz_acousticbrainz):
+        if provider is _audio:
+            got = await _audio(client, preview_url)
+        else:
+            got = await provider(client, ref)
+            if provider is _deezer:
+                preview_url = got.pop("preview_url", None)
         name = _PROVIDER_NAMES[provider]
         for k, v in got.items():
             if k not in merged:

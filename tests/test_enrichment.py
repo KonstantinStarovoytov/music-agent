@@ -654,12 +654,21 @@ async def test_acousticbrainz_picks_highest_key_strength_candidate(monkeypatch):
     respx.get(url__regex=r"acousticbrainz\.org.*").respond(
         json={
             # first in order, but least confident -- must NOT be chosen
-            "mbid-1": {"0": _ab_doc(tonal={"key_key": "C", "key_scale": "major",
-                                           "key_strength": 0.30})},
-            "mbid-2": {"0": _ab_doc(tonal={"key_key": "F", "key_scale": "minor",
-                                           "key_strength": 0.91})},
-            "mbid-3": {"0": _ab_doc(tonal={"key_key": "G", "key_scale": "major",
-                                           "key_strength": 0.55})},
+            "mbid-1": {
+                "0": _ab_doc(
+                    tonal={"key_key": "C", "key_scale": "major", "key_strength": 0.30}
+                )
+            },
+            "mbid-2": {
+                "0": _ab_doc(
+                    tonal={"key_key": "F", "key_scale": "minor", "key_strength": 0.91}
+                )
+            },
+            "mbid-3": {
+                "0": _ab_doc(
+                    tonal={"key_key": "G", "key_scale": "major", "key_strength": 0.55}
+                )
+            },
         }
     )
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
@@ -670,3 +679,208 @@ async def test_acousticbrainz_picks_highest_key_strength_candidate(monkeypatch):
     assert track is not None
     assert track.camelot == "4A"  # F minor, from the 0.91-confidence analysis
     assert track.key_confidence == pytest.approx(0.91)
+
+
+# --- Audio analysis provider (Deezer preview clips) --------------------------
+
+PREVIEW_URL = "https://cdns-preview-9.dzcdn.net/stream/fake-preview.mp3"
+DEEZER_SEARCH_WITH_PREVIEW = {
+    "data": [{"id": 3135556, "duration": 240, "preview": PREVIEW_URL}]
+}
+PREVIEW_ROUTE_RE = r"cdns-preview.*\.mp3"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_audio_analysis_supplies_key_deezer_supplies_bpm(monkeypatch):
+    """Deezer gives bpm + a preview URL, GetSongBPM is unavailable, and audio
+    analysis of the preview clip supplies the missing camelot key."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
+        json=DEEZER_SEARCH_WITH_PREVIEW
+    )
+    mock_deezer_track()
+    respx.get(url__regex=PREVIEW_ROUTE_RE).respond(200, content=b"fake mp3 bytes")
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    monkeypatch.setattr(
+        "musicagent.audio.analyze_preview",
+        lambda mp3_bytes: {"bpm": 128.0, "camelot": "3A", "key_confidence": 0.74},
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.bpm == 126.0  # from Deezer, not overwritten by audio analysis
+    assert track.camelot == "3A"
+    assert track.key_confidence == pytest.approx(0.74)
+    assert "deezer" in track.source and "audio" in track.source
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_audio_analysis_skipped_when_already_resolved():
+    """If Deezer + GetSongBPM already supply both bpm and camelot, the preview
+    clip must never be downloaded or analysed."""
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
+        json=DEEZER_SEARCH_WITH_PREVIEW
+    )
+    mock_deezer_track()
+    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    preview_route = respx.get(url__regex=PREVIEW_ROUTE_RE).respond(
+        200, content=b"fake mp3 bytes"
+    )
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.bpm == 126.0 and track.camelot == "8A"
+    assert preview_route.call_count == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_audio_analysis_unavailable_falls_through_to_acousticbrainz(
+    monkeypatch,
+):
+    """When audio analysis degrades to {} (essentia not installed / ffmpeg
+    missing -- simulated here at the seam), the cascade must fall through to
+    MusicBrainz/AcousticBrainz without raising."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
+        json=DEEZER_SEARCH_WITH_PREVIEW
+    )
+    mock_deezer_track()
+    respx.get(url__regex=PREVIEW_ROUTE_RE).respond(200, content=b"fake mp3 bytes")
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(json=MB_ONE_RECORDING)
+    respx.get(url__regex=r"acousticbrainz\.org.*").respond(
+        json={"mbid-1": {"0": _ab_doc()}}
+    )
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    monkeypatch.setattr("musicagent.audio.analyze_preview", lambda mp3_bytes: {})
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.camelot == "3A"  # from acousticbrainz, audio contributed nothing
+    assert "acousticbrainz" in track.source
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_audio_analysis_unparseable_key_falls_through_cleanly(monkeypatch):
+    """Analysis returning a bpm but no parseable camelot key must not crash;
+    the cascade still falls through to acousticbrainz for the key."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
+        json=DEEZER_SEARCH_WITH_PREVIEW
+    )
+    mock_deezer_track()
+    respx.get(url__regex=PREVIEW_ROUTE_RE).respond(200, content=b"fake mp3 bytes")
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(json=MB_ONE_RECORDING)
+    respx.get(url__regex=r"acousticbrainz\.org.*").respond(
+        json={"mbid-1": {"0": _ab_doc()}}
+    )
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    # Analysis "succeeded" (a bpm came back) but the key it found didn't parse
+    # as a musical key -- analyze_preview itself would return {} in that case
+    # (see audio.py), but exercising a bpm-only dict here still proves the
+    # cascade handles a partial audio result without crashing.
+    monkeypatch.setattr(
+        "musicagent.audio.analyze_preview", lambda mp3_bytes: {"bpm": 129.0}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.bpm == 126.0  # Deezer's bpm still wins (set first)
+    assert track.camelot == "3A"  # supplied by acousticbrainz, not audio
+    assert "acousticbrainz" in track.source
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_audio_analysis_oversized_preview_rejected_without_analysis(
+    monkeypatch,
+):
+    """A preview response over MAX_PREVIEW_BYTES must be rejected before any
+    analysis is attempted (and without buffering the whole thing)."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
+        json=DEEZER_SEARCH_WITH_PREVIEW
+    )
+    mock_deezer_track()
+    oversized = b"x" * (enrichment_mod.MAX_PREVIEW_BYTES + 1024)
+    respx.get(url__regex=PREVIEW_ROUTE_RE).respond(200, content=oversized)
+    respx.get(url__regex=r"musicbrainz\.org.*").respond(json={"recordings": []})
+
+    def _boom(mp3_bytes):
+        raise AssertionError("analysis must not be attempted on an oversized preview")
+
+    monkeypatch.setattr("musicagent.audio.analyze_preview", _boom)
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is None  # no camelot from anywhere: audio rejected, MB empty
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_audio_analysis_concurrency_bounded(monkeypatch):
+    """No more than AUDIO_ANALYSIS_CONCURRENCY analyses may run at once, even
+    when many tracks reach the audio-analysis stage concurrently."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
+        json=DEEZER_SEARCH_WITH_PREVIEW
+    )
+    mock_deezer_track()
+    respx.get(url__regex=PREVIEW_ROUTE_RE).respond(200, content=b"fake mp3 bytes")
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+
+    import threading
+    import time as _time
+
+    current = 0
+    max_seen = 0
+    lock = threading.Lock()
+
+    def fake_analyze(mp3_bytes):
+        # Runs inside asyncio.to_thread -- a plain worker thread, not the
+        # event loop -- so plain threading (not asyncio) primitives guard the
+        # counters, and a real (thread-blocking) sleep is what produces
+        # actual overlap between concurrently-scheduled analyses.
+        nonlocal current, max_seen
+        with lock:
+            current += 1
+            max_seen = max(max_seen, current)
+        _time.sleep(0.05)
+        with lock:
+            current -= 1
+        return {"bpm": 120.0, "camelot": "8A"}
+
+    monkeypatch.setattr("musicagent.audio.analyze_preview", fake_analyze)
+
+    engine = get_engine("sqlite:///:memory:")
+    init_db(engine)
+    refs = [TrackRef(artist=f"artist{i}", title=f"track{i}") for i in range(6)]
+    resolved, unresolved = await enrich_all(refs, TrackCache(engine))
+
+    assert len(resolved) == 6
+    assert unresolved == []
+    assert max_seen <= enrichment_mod.AUDIO_ANALYSIS_CONCURRENCY
+    assert max_seen == enrichment_mod.AUDIO_ANALYSIS_CONCURRENCY

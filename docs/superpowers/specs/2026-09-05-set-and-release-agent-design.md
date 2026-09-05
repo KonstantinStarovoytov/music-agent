@@ -26,8 +26,9 @@ explaining decisions); all music math is deterministic, tested Python.
 - LLM: OpenAI (or Luna via `OPENAI_BASE_URL`); fallback Gemini/Groq free tier
 - Langfuse (cloud free tier) — tracing on every node
 - Supabase Postgres (free tier); pgvector enabled in phase 2
-- Music data (all free): Deezer → GetSongBPM → MusicBrainz/AcousticBrainz
-  (BPM/key cascade), Last.fm (tags, similar artists)
+- Music data (all free): Deezer → GetSongBPM → audio analysis of Deezer
+  preview clips → MusicBrainz/AcousticBrainz (BPM/key cascade), Last.fm
+  (tags, similar artists)
 
 ## 3. MVP architecture — Set Builder graph
 
@@ -65,10 +66,39 @@ in code must match this table (enforced by spec-sync skill).
   at 30 tracks, both applied before enrichment so the cost cap is real.
 
 ### Enrichment cascade
-Per track: Deezer (no key needed) → GetSongBPM → MusicBrainz/AcousticBrainz;
-tags/genre from Last.fm. The cascade stops as soon as both `bpm` and
-`camelot` are known, so the third provider is only consulted when the first
-two didn't together supply both.
+Per track: Deezer (no key needed) → GetSongBPM → audio analysis of the
+Deezer preview clip → MusicBrainz/AcousticBrainz; tags/genre from Last.fm.
+The cascade stops as soon as both `bpm` and `camelot` are known, so each
+later provider is only consulted when the earlier ones didn't together
+supply both.
+
+**Audio analysis (`src/musicagent/audio.py`)** exists because the metadata
+providers above cover mainstream/catalogued releases well but miss
+underground ones almost entirely: measured on a real 15-track underground
+techno playlist, MusicBrainz/AcousticBrainz resolved 0/15 and Deezer's own
+metadata supplied bpm for 7 and never a key — but 13/15 of those tracks have
+a public 30-second preview clip on Deezer, and analysing that clip supplies
+key, bpm, and an energy proxy for any of them. It reuses the preview URL
+(`hit["preview"]`) already present on the Deezer `/search` hit `_deezer`
+fetches, rather than searching Deezer a second time. Per track it costs
+roughly ~0.75s (download + ffmpeg decode + essentia analysis, measured) —
+well under the MusicBrainz throttle's 1.1s/track alone — and Essentia's
+`KeyExtractor`/`RhythmExtractor2013` supply the key/bpm; `key_confidence` is
+set from Essentia's key strength the same way it is for AcousticBrainz.
+
+Both `essentia` (the DSP/ML library doing the analysis) and the `ffmpeg`
+binary it depends on for mp3 decoding are optional at runtime: `essentia` is
+an optional dependency (the `audio` extra, not installed by default — it
+costs ~190MB RSS just to import) and `ffmpeg` cannot be installed via pip at
+all. If either is missing, the provider degrades to contributing nothing
+(logged once, not per track) rather than crashing — a deployment without
+them runs on the metadata providers alone. Essentia's own key detection is
+roughly 70-80% accurate (same caveat as AcousticBrainz below), which is why
+`key_confidence` is surfaced rather than treating the key as ground truth.
+Note: Deezer's terms of use don't explicitly address programmatically
+analysing preview clips (as opposed to just linking/playing them); this MVP
+treats that as acceptable for a non-commercial portfolio demo, not as a
+reviewed legal position.
 
 MusicBrainz/AcousticBrainz needs no API key, unlike GetSongBPM (which
 additionally requires a public backlink the site doesn't have, so in
@@ -107,7 +137,8 @@ reported in the response.
 - `tracks`: id, artist, title, bpm, musical_key, camelot, energy, duration_s,
   tags jsonb, source, key_confidence, fetched_at. Unique on (artist, title)
   normalized. `key_confidence` is only ever set when `camelot` came from
-  AcousticBrainz (its `tonal.key_strength`); null otherwise.
+  audio analysis (Essentia's key strength) or AcousticBrainz (its
+  `tonal.key_strength`); null otherwise.
 - `sets`: id, request jsonb (the raw request, including the truncation
   `notice` if any), result jsonb (the full `SetResult`), created_at. Stored
   so the site demo can replay real past sets.
@@ -153,7 +184,12 @@ Phase 2 adds pgvector tables (pitch corpus embeddings).
 
 ## 9. Out of scope
 
-- Audio file analysis (no filesystem/audio dependency by design).
+- User-uploaded audio file analysis. The one audio dependency the MVP does
+  have is narrow and optional: analysing Deezer's own public 30-second
+  preview clips as an enrichment fallback (§3, `src/musicagent/audio.py`),
+  gated behind the optional `audio` extra and a runtime `ffmpeg` check so a
+  deployment without them still runs. There is no upload path, no storage of
+  audio, and no analysis of anything the user provides directly.
 - Spotify API (audio-features closed for new apps since Nov 2024).
 - Auth/multi-user; the API is a public portfolio demo. `POST /sets` has an
   in-process, per-client-host rate limit (5 requests/minute); the key is the

@@ -31,6 +31,20 @@ phase2 = [
     "mcp[cli]>=2.1.1",
 ]
 
+# Audio analysis of Deezer preview clips (src/musicagent/audio.py), an
+# enrichment provider used when Deezer/GetSongBPM/MusicBrainz-AcousticBrainz
+# don't together supply both bpm and camelot -- optional because essentia
+# costs ~190MB RSS to import and also needs the ffmpeg binary (not installable
+# via pip) on PATH. Without this extra (and/or without ffmpeg), the provider
+# degrades to a no-op and the app runs on the metadata providers alone.
+# Pinned exactly (rather than a lower bound): essentia publishes frequent dev
+# builds and the newest ones on PyPI at the time of writing only ship a
+# cp314 wheel, not cp313 (this project's pinned interpreter) -- a >= bound
+# would happily resolve to one of those and fail to install.
+audio = [
+    "essentia==2.1b6.dev1389",
+]
+
 [dependency-groups]
 dev = [
     "asgi-lifespan>=2.1.0",
