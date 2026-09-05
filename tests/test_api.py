@@ -110,6 +110,38 @@ async def test_llm_output_error_hides_internal_exception_text():
     assert "RuntimeError" not in body
 
 
+@pytest.mark.asyncio
+async def test_generic_exception_mid_run_streams_error_event_not_500(monkeypatch):
+    """A plain (non-LLMOutputError) exception raised mid-run -- e.g. a bug or
+    network failure in a non-LLM node -- must still produce a graceful `error`
+    SSE event, never an aborted stream or a leaked internal exception message.
+    """
+
+    async def boom_enrich_all(refs, cache):
+        raise RuntimeError("boom: unexpected failure detail")
+
+    monkeypatch.setattr("musicagent.graph.enrich_all", boom_enrich_all)
+
+    engine = get_engine("sqlite:///:memory:")
+    init_db(engine)
+    app = create_app(engine=engine, llm=FakeLLM())
+    transport = httpx.ASGITransport(app=app)
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+        client.stream("POST", "/sets", json={"text": "a t1, b t2"}) as r,
+    ):
+        assert r.status_code == 200
+        body = "".join([chunk async for chunk in r.aiter_text()])
+
+    from musicagent.api import GENERIC_ERROR_MESSAGE
+
+    assert "event: error" in body
+    assert GENERIC_ERROR_MESSAGE in body
+    assert "event: result" not in body
+    assert "boom" not in body
+    assert "unexpected failure detail" not in body
+
+
 def test_create_app_requires_no_env_vars(monkeypatch):
     monkeypatch.setattr("os.environ", {}, raising=False)
     engine = get_engine("sqlite:///:memory:")

@@ -14,6 +14,10 @@ AI-агент (пет-проект для портфолио vojt): по спи�
 - `uv run pytest` — тесты
 - `uv run ruff check .` — линт (формат гоняется хуком автоматически)
 - `uv sync` — установка зависимостей
+- `uv run uvicorn --factory musicagent.api:get_app --port 8123` — запуск API
+  (нужен `DATABASE_URL`; для локального запуска без Postgres подойдёт
+  `DATABASE_URL=sqlite:////tmp/musicagent.db`). PYTHONPATH не нужен —
+  `pythonpath = ["src"]` уже в `pyproject.toml`.
 
 ## После изменения графа
 Запускай субагента `graph-reviewer` для ревью структуры графа.

@@ -22,6 +22,13 @@ LLM_ERROR_MESSAGE = (
     "'artist - title'."
 )
 
+# Fixed, generic message for any *other* unhandled exception mid-run (network
+# failure in enrichment, a bug in a node, etc). Never includes the underlying
+# exception text -- that is logged server-side instead. See task-10 review
+# residual: only LLMOutputError was caught, so any other exception aborted the
+# stream with no event at all.
+GENERIC_ERROR_MESSAGE = "Something went wrong while building the set. Please try again."
+
 # Request-body cap (finding 2a): reject oversized bodies with a 422 before any
 # LLM/enrichment work starts.
 MAX_TEXT_LENGTH = 4000
@@ -71,6 +78,17 @@ def create_app(engine=None, llm=None) -> FastAPI:
                     # anonymous client. See task-9 review finding 1.
                     logger.exception("LLM output error while building set")
                     yield {"event": "error", "data": LLM_ERROR_MESSAGE}
+                    return
+                except Exception:
+                    # Any other unhandled exception mid-run (enrichment
+                    # network failure, a bug in a node, etc) must not abort
+                    # the stream silently. Log with traceback server-side and
+                    # emit the same kind of generic error event as above, with
+                    # a distinct message, so the client always gets a
+                    # terminal event instead of a dropped connection. See
+                    # task-10 review residual.
+                    logger.exception("Unhandled exception while building set")
+                    yield {"event": "error", "data": GENERIC_ERROR_MESSAGE}
                     return
 
                 result = state["result"]
