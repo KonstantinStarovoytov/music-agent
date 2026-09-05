@@ -1,0 +1,33 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repo.
+# Secrets (OPENAI_API_KEY, DATABASE_URL, ...) are entered in the dashboard on
+# first sync (sync: false), never committed here.
+services:
+  - type: web
+    name: music-agent
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_BASE_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        sync: false
+      - key: LASTFM_API_KEY
+        sync: false
+      - key: GETSONGBPM_API_KEY
+        sync: false
+      # Portfolio site origin for CORS, e.g. https://vojt.example.com
+      - key: SITE_ORIGIN
+        sync: false
