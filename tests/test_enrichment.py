@@ -12,6 +12,12 @@ from musicagent.models import Track, TrackRef
 DEEZER = {"data": [{"bpm": 126.0, "gain": -8.0, "duration": 240}]}
 GSB = {"search": [{"tempo": "126", "key_of": "Am"}]}
 
+# Captured at import time, before any test/fixture monkeypatches asyncio.sleep
+# (the autouse fast_retries fixture replaces it with a no-op) -- needed by the
+# concurrency-bound test below, which requires a *real* sleep to make
+# concurrently-scheduled tasks actually overlap in time.
+_REAL_SLEEP = asyncio.sleep
+
 
 @pytest.fixture(autouse=True)
 def api_keys(monkeypatch):
@@ -23,6 +29,7 @@ def api_keys(monkeypatch):
 @pytest.fixture(autouse=True)
 def fast_retries(monkeypatch):
     """Skip real backoff sleeps so retry tests stay fast."""
+
     async def _no_sleep(_):
         return None
 
@@ -34,9 +41,13 @@ def fast_retries(monkeypatch):
 async def test_enrich_one_deezer_bpm_gsb_key():
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER)
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
-    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(json={"toptags": {"tag": [{"name": "electronic"}]}})
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": [{"name": "electronic"}]}}
+    )
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert track and track.bpm == 126.0 and track.camelot == "8A"
     assert "electronic" in track.tags
 
@@ -47,7 +58,9 @@ async def test_unresolvable_goes_to_unresolved():
     respx.get(url__regex=r".*").respond(json={"data": [], "search": None})
     engine = get_engine("sqlite:///:memory:")
     init_db(engine)
-    resolved, unresolved = await enrich_all([TrackRef(artist="x", title="y")], TrackCache(engine))
+    resolved, unresolved = await enrich_all(
+        [TrackRef(artist="x", title="y")], TrackCache(engine)
+    )
     assert resolved == [] and len(unresolved) == 1
 
 
@@ -58,7 +71,9 @@ async def test_cache_hit_skips_network():
     cache = TrackCache(engine)
     ref = TrackRef(artist="a", title="b")
     cache.put(Track(ref=ref, bpm=120, camelot="8A", source="deezer"))
-    resolved, unresolved = await enrich_all([ref], cache)  # no respx: network would raise
+    resolved, unresolved = await enrich_all(
+        [ref], cache
+    )  # no respx: network would raise
     assert resolved[0].bpm == 120 and unresolved == []
 
 
@@ -69,9 +84,13 @@ async def test_provider_500_retries_then_falls_through():
     through to the next provider rather than crashing enrichment."""
     deezer_route = respx.get(url__regex=r"api\.deezer\.com/search.*").respond(500)
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
-    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(json={"toptags": {"tag": []}})
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert deezer_route.call_count == 3
     assert track is not None
     assert track.bpm == 126.0
@@ -83,11 +102,17 @@ async def test_provider_500_retries_then_falls_through():
 @respx.mock
 async def test_provider_malformed_json_retries_then_falls_through():
     """Malformed (non-JSON) response body must also retry then fall through, not crash."""
-    deezer_route = respx.get(url__regex=r"api\.deezer\.com/search.*").respond(200, content="not json")
+    deezer_route = respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
+        200, content="not json"
+    )
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
-    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(json={"toptags": {"tag": []}})
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert deezer_route.call_count == 3
     assert track is not None and track.bpm == 126.0
 
@@ -98,7 +123,9 @@ async def test_all_providers_fail_marks_unresolved_not_crash():
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(500)
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(500)
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert track is None
 
 
@@ -119,9 +146,13 @@ async def test_enrich_all_partial_failure_does_not_fail_batch():
             return httpx.Response(200, json={"search": []})
         return httpx.Response(200, json=GSB)
 
-    respx.get(url__regex=r"api\.deezer\.com/search.*").mock(side_effect=deezer_side_effect)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").mock(
+        side_effect=deezer_side_effect
+    )
     respx.get(url__regex=r"api\.getsongbpm\.com.*").mock(side_effect=gsb_side_effect)
-    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(json={"toptags": {"tag": []}})
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
 
     engine = get_engine("sqlite:///:memory:")
     init_db(engine)
@@ -138,7 +169,9 @@ async def test_missing_getsongbpm_key_skips_provider_without_crash(monkeypatch):
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER)
     gsb_route = respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert gsb_route.call_count == 0
     # Deezer alone never supplies a Camelot key, and GSB is skipped -> unresolved,
     # but critically: no exception was raised.
@@ -156,7 +189,9 @@ async def test_missing_lastfm_key_yields_empty_tags_without_crash(monkeypatch):
         json={"toptags": {"tag": [{"name": "electronic"}]}}
     )
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert track is not None
     assert track.tags == []
     assert lastfm_route.call_count == 0
@@ -167,9 +202,13 @@ async def test_missing_lastfm_key_yields_empty_tags_without_crash(monkeypatch):
 async def test_resolved_track_written_to_cache_and_second_call_skips_network():
     """Every resolved enrichment is written to the cache exactly once, and a subsequent
     call for the same track makes no HTTP request at all."""
-    deezer_route = respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER)
+    deezer_route = respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
+        json=DEEZER
+    )
     gsb_route = respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
-    lastfm_route = respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(json={"toptags": {"tag": []}})
+    lastfm_route = respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
     engine = get_engine("sqlite:///:memory:")
     init_db(engine)
     cache = TrackCache(engine)
@@ -204,9 +243,13 @@ async def test_provider_returns_json_list_falls_through_without_crash():
     failed response, not crash with AttributeError."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(200, json=[1, 2, 3])
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
-    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(json={"toptags": {"tag": []}})
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert track is not None
     assert track.bpm == 126.0
     assert track.camelot == "8A"
@@ -219,9 +262,13 @@ async def test_provider_returns_json_string_falls_through_without_crash():
     response rather than crashing when callers do `.get(...)` on it."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(200, json="oops")
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
-    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(json={"toptags": {"tag": []}})
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert track is not None
     assert track.bpm == 126.0
     assert track.camelot == "8A"
@@ -237,7 +284,9 @@ async def test_lastfm_single_tag_returned_as_bare_dict():
         json={"toptags": {"tag": {"name": "electronic"}}}
     )
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert track is not None
     assert track.tags == ["electronic"]
 
@@ -252,7 +301,9 @@ async def test_lastfm_items_missing_name_are_skipped():
         json={"toptags": {"tag": [{"count": 5}, {"name": "electronic"}, "not-a-dict"]}}
     )
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert track is not None
     assert track.tags == ["electronic"]
 
@@ -297,9 +348,13 @@ async def test_source_reflects_mixed_provenance_not_plain_deezer():
     gsb_key_only = {"search": [{"key_of": "Am"}]}
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=deezer_no_key)
     respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=gsb_key_only)
-    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(json={"toptags": {"tag": []}})
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert track is not None
     assert track.bpm == 126.0
     assert track.camelot == "8A"
@@ -327,9 +382,45 @@ async def test_hanging_track_times_out_and_is_reported_unresolved(monkeypatch):
     monkeypatch.setattr(enrichment_mod, "_enrich_one_inner", hang_forever)
 
     async with httpx.AsyncClient() as client:
-        track = await enrich_one(TrackRef(artist="Bicep", title="Glue"), client, cache=None)
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
     assert track is None
 
-    resolved, unresolved = await enrich_all([TrackRef(artist="Bicep", title="Glue")], cache=None)
+    resolved, unresolved = await enrich_all(
+        [TrackRef(artist="Bicep", title="Glue")], cache=None
+    )
     assert resolved == []
     assert len(unresolved) == 1
+
+
+# --- Finding 2c: bounded enrichment fan-out -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enrich_all_bounds_concurrency(monkeypatch):
+    """enrich_all must never have more than ENRICH_CONCURRENCY tracks' worth of
+    per-track work in flight at once, even when given a much larger batch."""
+    current = 0
+    max_seen = 0
+    lock = asyncio.Lock()
+
+    async def fake_enrich_one(ref, client, cache):
+        nonlocal current, max_seen
+        async with lock:
+            current += 1
+            max_seen = max(max_seen, current)
+        await _REAL_SLEEP(0.02)
+        async with lock:
+            current -= 1
+        return Track(ref=ref, bpm=120, camelot="8A")
+
+    monkeypatch.setattr(enrichment_mod, "enrich_one", fake_enrich_one)
+
+    refs = [TrackRef(artist=f"artist{i}", title=f"track{i}") for i in range(20)]
+    resolved, unresolved = await enrich_all(refs, cache=None)
+
+    assert len(resolved) == 20
+    assert unresolved == []
+    assert max_seen <= enrichment_mod.ENRICH_CONCURRENCY
+    assert max_seen == enrichment_mod.ENRICH_CONCURRENCY  # actually saturates the bound

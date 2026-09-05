@@ -1,18 +1,34 @@
 import json
+import logging
 import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from musicagent.db import SetStore, TrackCache, get_engine, init_db
 from musicagent.graph import build_graph, get_langfuse_handler
 from musicagent.llm import LLMOutputError
 
+logger = logging.getLogger(__name__)
+
+# Fixed, generic message shown to anonymous callers when the LLM cannot produce
+# a valid set from the request. Never includes the underlying exception text
+# (which may contain provider/auth/rate-limit details) -- that is logged
+# server-side instead. See task-9 review finding 1.
+LLM_ERROR_MESSAGE = (
+    "Could not build a set from this request -- try naming the tracks as "
+    "'artist - title'."
+)
+
+# Request-body cap (finding 2a): reject oversized bodies with a 422 before any
+# LLM/enrichment work starts.
+MAX_TEXT_LENGTH = 4000
+
 
 class SetIn(BaseModel):
-    text: str
+    text: str = Field(..., max_length=MAX_TEXT_LENGTH)
 
 
 def create_app(engine=None, llm=None) -> FastAPI:
@@ -40,25 +56,39 @@ def create_app(engine=None, llm=None) -> FastAPI:
         async def events():
             state: dict = {}
             try:
-                async for update in graph.astream(
-                    {"text": body.text},
-                    config={"callbacks": get_langfuse_handler()},
-                ):
-                    node, out = next(iter(update.items()))
-                    state.update(out)
-                    yield {"event": "progress", "data": node}
-            except LLMOutputError as exc:
-                yield {"event": "error", "data": str(exc)}
-                return
+                try:
+                    async for update in graph.astream(
+                        {"text": body.text},
+                        config={"callbacks": get_langfuse_handler()},
+                    ):
+                        node, out = next(iter(update.items()))
+                        state.update(out)
+                        yield {"event": "progress", "data": node}
+                except LLMOutputError:
+                    # Log the real exception (with traceback) server-side only;
+                    # the caller gets a fixed, generic message so internal
+                    # provider/auth/rate-limit error text never leaks to an
+                    # anonymous client. See task-9 review finding 1.
+                    logger.exception("LLM output error while building set")
+                    yield {"event": "error", "data": LLM_ERROR_MESSAGE}
+                    return
 
-            result = state["result"]
-            set_id = store.save({"text": body.text}, result)
-            yield {
-                "event": "result",
-                "data": json.dumps(
-                    {"set_id": set_id, "result": json.loads(result.model_dump_json())}
-                ),
-            }
+                result = state["result"]
+                notice = state.get("notice")
+                set_id = store.save({"text": body.text}, result)
+                payload = {
+                    "set_id": set_id,
+                    "result": json.loads(result.model_dump_json()),
+                }
+                if notice:
+                    payload["notice"] = notice
+                yield {"event": "result", "data": json.dumps(payload)}
+            finally:
+                if "result" not in state:
+                    logger.info(
+                        "SSE stream for /sets ended before producing a result "
+                        "(client disconnect or unhandled error)"
+                    )
 
         return EventSourceResponse(events())
 

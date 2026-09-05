@@ -10,6 +10,7 @@ from musicagent.models import Track, TrackRef
 TIMEOUT = 10.0
 RETRIES = 2
 ENRICH_DEADLINE_S = 25.0
+ENRICH_CONCURRENCY = 8
 
 
 async def _get_json(client: httpx.AsyncClient, url: str, **kw) -> dict | None:
@@ -175,13 +176,22 @@ async def enrich_one(
 async def enrich_all(
     refs: list[TrackRef], cache: TrackCache | None
 ) -> tuple[list[Track], list[TrackRef]]:
-    """Enrich all refs concurrently. A single unresolvable/failing track never fails
-    the whole batch; it is simply reported in the unresolved list. Any unexpected
-    exception from an individual track's enrichment is also treated as unresolved
-    rather than propagated, so one buggy provider path can never take down the batch."""
+    """Enrich all refs concurrently, bounded to ENRICH_CONCURRENCY tracks in flight
+    at once (a semaphore gates per-track work) so a large track list can't fan out
+    into an unbounded number of simultaneous upstream HTTP calls. A single
+    unresolvable/failing track never fails the whole batch; it is simply reported
+    in the unresolved list. Any unexpected exception from an individual track's
+    enrichment is also treated as unresolved rather than propagated, so one buggy
+    provider path can never take down the batch."""
+    sem = asyncio.Semaphore(ENRICH_CONCURRENCY)
+
+    async def _bounded(ref: TrackRef, client: httpx.AsyncClient) -> Track | None:
+        async with sem:
+            return await enrich_one(ref, client, cache)
+
     async with httpx.AsyncClient() as client:
         results = await asyncio.gather(
-            *(enrich_one(r, client, cache) for r in refs), return_exceptions=True
+            *(_bounded(r, client) for r in refs), return_exceptions=True
         )
     resolved = [t for t in results if isinstance(t, Track)]
     unresolved = [r for r, t in zip(refs, results) if not isinstance(t, Track)]

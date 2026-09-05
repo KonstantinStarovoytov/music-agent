@@ -16,6 +16,8 @@ from musicagent.models import (
     TransitionGraph,
 )
 
+MAX_TRACKS = 30
+
 
 class SetState(TypedDict, total=False):
     text: str
@@ -25,6 +27,7 @@ class SetState(TypedDict, total=False):
     transition_graph: TransitionGraph
     path: SetPath
     result: SetResult
+    notice: str | None
 
 
 def get_langfuse_handler() -> list:
@@ -37,7 +40,15 @@ def get_langfuse_handler() -> list:
 
 def build_graph(cache=None, llm=None):
     def n_parse(state: SetState) -> SetState:
-        return {"request": parse_input(state["text"], llm=llm)}
+        request = parse_input(state["text"], llm=llm)
+        notice = None
+        if len(request.tracks) > MAX_TRACKS:
+            request = request.model_copy(update={"tracks": request.tracks[:MAX_TRACKS]})
+            notice = (
+                f"Request contained more than {MAX_TRACKS} tracks; "
+                f"truncated to the first {MAX_TRACKS}."
+            )
+        return {"request": request, "notice": notice}
 
     async def n_enrich(state: SetState) -> SetState:
         tracks, unresolved = await enrich_all(state["request"].tracks, cache)
