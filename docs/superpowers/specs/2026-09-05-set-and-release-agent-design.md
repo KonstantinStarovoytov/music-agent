@@ -38,7 +38,7 @@ parse_input → enrich_tracks → build_transition_graph → find_set_path → e
 
 | Node | Kind | Contract (in → out) |
 |---|---|---|
-| parse_input | LLM | free text → `SetRequest{tracks: list[TrackRef], duration_min?, energy_shape}` |
+| parse_input | LLM | free text → `SetRequest{tracks, duration_min?, energy_shape}` + optional `notice` string in state (truncation msg if needed); dedupes refs on normalized (artist, title), caps at MAX_TRACKS (30) |
 | enrich_tracks | code, parallel | `list[TrackRef]` → `list[Track]` (+ `unresolved: list[TrackRef]`) |
 | build_transition_graph | pure Python | `list[Track]` → `TransitionGraph{edges: (a, b, score)}` |
 | find_set_path | pure Python | `TransitionGraph` + `energy_shape` → `SetPath{ordered tracks, per-edge scores}`, followed by a duration trim honouring `duration_min` (keeping a floor of 2 tracks) |
@@ -62,6 +62,8 @@ in code must match this table (enforced by spec-sync skill).
   `wave`) at that position -- these are two distinct energy comparisons.
   Returns best-scoring Hamiltonian-ish path over resolved tracks (not
   required to include all).
+- Input deduplication and cap: dedupe on normalized (artist, title) then cap
+  at 30 tracks, both applied before enrichment so the cost cap is real.
 
 ### Enrichment cascade
 Per track: Deezer (no key needed) → GetSongBPM; tags/genre from Last.fm.
