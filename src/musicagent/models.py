@@ -49,3 +49,7 @@ class SetResult(BaseModel):
     transitions: list[Transition]
     summary: str
     unresolved: list[TrackRef] = []
+    # Tracks that enriched fine (so they're not in `unresolved`) but ended up
+    # with no place in the final path -- either no compatible edge to any
+    # other track, or trimmed from the end to fit a requested duration_min.
+    omitted: list[TrackRef] = []

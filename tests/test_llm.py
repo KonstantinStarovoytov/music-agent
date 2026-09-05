@@ -147,6 +147,47 @@ def test_explain_set_preserves_unresolved():
     assert result.unresolved == unresolved_refs
 
 
+def test_explain_set_preserves_omitted_and_defaults_to_empty():
+    """omitted is carried through when given, and defaults to [] when the
+    caller (e.g. run_set with nothing left out) doesn't pass it."""
+    tracks = [
+        Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A"),
+        Track(ref=TrackRef(artist="b", title="t2"), bpm=128, camelot="9A"),
+    ]
+    path = SetPath(tracks=tracks, edge_scores=[0.9])
+    omitted_refs = [TrackRef(artist="c", title="island")]
+    fake = FakeLLM(_Explanations(explanations=["smooth"], summary="nice set"))
+
+    result = explain_set(path, unresolved=[], omitted=omitted_refs, llm=fake)
+    assert result.omitted == omitted_refs
+
+    result_default = explain_set(path, unresolved=[], llm=fake)
+    assert result_default.omitted == []
+
+
+def test_explain_set_mentions_omitted_tracks_in_prompt_only_when_present():
+    """The omitted-tracks note is only added to the prompt when there's
+    something to say -- an empty omitted list must cost nothing."""
+    tracks = [
+        Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A"),
+        Track(ref=TrackRef(artist="b", title="t2"), bpm=128, camelot="9A"),
+    ]
+    path = SetPath(tracks=tracks, edge_scores=[0.9])
+
+    recorder = RecordingLLM(_Explanations(explanations=["smooth"], summary="nice"))
+    explain_set(path, unresolved=[], llm=recorder)
+    assert "island" not in recorder.prompts[0]
+
+    recorder2 = RecordingLLM(_Explanations(explanations=["smooth"], summary="nice"))
+    explain_set(
+        path,
+        unresolved=[],
+        omitted=[TrackRef(artist="c", title="island")],
+        llm=recorder2,
+    )
+    assert "island" in recorder2.prompts[0]
+
+
 def test_parse_input_lazy_llm_no_network_and_no_import_side_effect(monkeypatch):
     """get_llm() must not be invoked at import time, and importing the module
     (and referencing get_llm) must not raise even with no API key set. get_llm

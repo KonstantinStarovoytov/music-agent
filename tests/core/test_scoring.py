@@ -3,12 +3,19 @@ from musicagent.models import Track, TrackRef
 
 
 def t(title, bpm, camelot, energy=0.5):
-    return Track(ref=TrackRef(artist="x", title=title), bpm=bpm, camelot=camelot, energy=energy)
+    return Track(
+        ref=TrackRef(artist="x", title=title), bpm=bpm, camelot=camelot, energy=energy
+    )
 
 
 def test_bpm_window():
-    assert bpm_ok(128, 130)          # ~1.6%
-    assert not bpm_ok(128, 140)      # ~9%
+    assert bpm_ok(128, 130)  # ~1.6%
+    assert not bpm_ok(128, 140)  # ~9%
+
+
+def test_bpm_window_boundary():
+    assert bpm_ok(100, 106)  # exactly 6/106 = 5.66% <= 6%
+    assert not bpm_ok(100, 106.4)  # 6.4/106.4 = 6.01% > 6%
 
 
 def test_incompatible_key_scores_zero():

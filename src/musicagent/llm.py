@@ -20,11 +20,13 @@ class _Explanations(BaseModel):
 
 class LLMOutputError(RuntimeError):
     """Raised when an LLM node fails to produce valid structured output,
-    even after one repair retry (spec.md section 6)."""
+    even after one retry (spec.md section 6)."""
 
 
-PARSE_PROMPT = """You parse DJ set requests. Extract the track list (artist + title)
-and the desired energy shape (build / peak_end / wave; default peak_end).
+PARSE_PROMPT = """You parse DJ set requests. Extract the track list (artist + title),
+the desired energy shape (build / peak_end / wave; default peak_end), and, if the
+request names a target set length (e.g. "a 45 minute set", "about an hour"), the
+duration in minutes as duration_min.
 User request:
 {text}"""
 
@@ -34,13 +36,16 @@ Camelot wheel, BPM closeness, energy movement). Then a 1-2 sentence summary of t
 Return exactly {n} explanations, in order.
 
 Tracks (in play order, with camelot/bpm/energy):
-{tracks}"""
+{tracks}{omitted_note}"""
 
 
 def _invoke_structured(llm, schema: type, prompt: str, node: str):
     """Invoke `llm.with_structured_output(schema).invoke(prompt)`, validating the
     result is an instance of `schema`. Retries exactly once on any failure
-    (exception, None, wrong type). Raises LLMOutputError if the retry also fails.
+    (exception, None, wrong type) by replaying the identical prompt -- this is
+    a plain retry, not a repair: there is no error feedback given back to the
+    model, since the model never sees why the first attempt was rejected.
+    Raises LLMOutputError if the retry also fails.
     """
 
     def _attempt():
@@ -64,7 +69,7 @@ def _invoke_structured(llm, schema: type, prompt: str, node: str):
 
     raise LLMOutputError(
         f"{node}: LLM failed to produce valid {schema.__name__} output after "
-        f"one repair retry (last error: {err2 or err})"
+        f"one retry (last error: {err2 or err})"
     )
 
 
@@ -78,10 +83,19 @@ def parse_input(text: str, llm=None) -> SetRequest:
     return request
 
 
-def explain_set(path: SetPath, unresolved: list[TrackRef], llm=None) -> SetResult:
+def explain_set(
+    path: SetPath,
+    unresolved: list[TrackRef],
+    omitted: list[TrackRef] | None = None,
+    llm=None,
+) -> SetResult:
+    omitted = omitted or []
     if len(path.tracks) < 2:
         return SetResult(
-            transitions=[], summary="No transitions to explain.", unresolved=unresolved
+            transitions=[],
+            summary="No transitions to explain.",
+            unresolved=unresolved,
+            omitted=omitted,
         )
 
     llm = llm or get_llm()
@@ -90,10 +104,16 @@ def explain_set(path: SetPath, unresolved: list[TrackRef], llm=None) -> SetResul
         f"{i + 1}. {t.ref.artist} - {t.ref.title} [{t.camelot}, {t.bpm:.0f} BPM, energy {t.energy:.2f}]"
         for i, t in enumerate(path.tracks)
     )
+    # Only add this line (and its tokens) when there's something to say --
+    # most requests place every resolved track, so this costs nothing then.
+    omitted_note = ""
+    if omitted:
+        names = ", ".join(f"{r.artist} - {r.title}" for r in omitted)
+        omitted_note = f"\n\n(Left out of the set, though resolved fine: {names}.)"
     out = _invoke_structured(
         llm,
         _Explanations,
-        EXPLAIN_PROMPT.format(n=len(pairs), tracks=lines),
+        EXPLAIN_PROMPT.format(n=len(pairs), tracks=lines, omitted_note=omitted_note),
         node="explain_set",
     )
     raw_explanations = out.explanations or []
@@ -104,5 +124,8 @@ def explain_set(path: SetPath, unresolved: list[TrackRef], llm=None) -> SetResul
         for (a, b), e in zip(pairs, exps)
     ]
     return SetResult(
-        transitions=transitions, summary=out.summary, unresolved=unresolved
+        transitions=transitions,
+        summary=out.summary,
+        unresolved=unresolved,
+        omitted=omitted,
     )

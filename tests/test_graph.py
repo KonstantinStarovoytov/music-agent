@@ -62,6 +62,71 @@ class FailingParseLLM:
         raise RuntimeError("parse always fails")
 
 
+class DuplicateTracksLLM:
+    """Parses to two entries for the same track (differing only in casing and
+    surrounding whitespace) plus one distinct track, to exercise I4's dedup
+    in n_parse."""
+
+    def with_structured_output(self, schema):
+        self.schema = schema
+        return self
+
+    def invoke(self, prompt):
+        if self.schema is SetRequest:
+            return SetRequest(
+                tracks=[
+                    TrackRef(artist="a", title="t1"),
+                    TrackRef(artist=" A ", title="T1"),
+                    TrackRef(artist="b", title="t2"),
+                ],
+                energy_shape="build",
+            )
+        return _Explanations(explanations=["works"], summary="ok")
+
+
+class ThreeTrackWithIslandLLM:
+    """Parses to three tracks, one of which (island) is BPM-incompatible with
+    the other two and so can never share an edge with them."""
+
+    def with_structured_output(self, schema):
+        self.schema = schema
+        return self
+
+    def invoke(self, prompt):
+        if self.schema is SetRequest:
+            return SetRequest(
+                tracks=[
+                    TrackRef(artist="a", title="t1"),
+                    TrackRef(artist="b", title="t2"),
+                    TrackRef(artist="c", title="island"),
+                ],
+                energy_shape="peak_end",
+            )
+        return _Explanations(explanations=["works"], summary="ok")
+
+
+class DurationCappedLLM:
+    """Parses to three compatible tracks plus a duration_min that only fits
+    two of them."""
+
+    def with_structured_output(self, schema):
+        self.schema = schema
+        return self
+
+    def invoke(self, prompt):
+        if self.schema is SetRequest:
+            return SetRequest(
+                tracks=[
+                    TrackRef(artist="a", title="t1"),
+                    TrackRef(artist="b", title="t2"),
+                    TrackRef(artist="c", title="t3"),
+                ],
+                duration_min=5,
+                energy_shape="build",
+            )
+        return _Explanations(explanations=["works", "works too"], summary="ok")
+
+
 @pytest.mark.asyncio
 async def test_run_set_end_to_end_offline():
     engine = get_engine("sqlite:///:memory:")
@@ -144,7 +209,17 @@ def test_get_langfuse_handler_returns_empty_list_without_key(monkeypatch):
 
 
 def test_build_graph_constructible_with_no_env_vars(monkeypatch):
-    monkeypatch.setattr("os.environ", {}, raising=False)
+    for name in (
+        "LANGFUSE_SECRET_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "GOOGLE_API_KEY",
+        "GROQ_API_KEY",
+        "GETSONGBPM_API_KEY",
+        "LASTFM_API_KEY",
+        "DATABASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
     graph = build_graph()
     assert graph is not None
 
@@ -213,3 +288,100 @@ async def test_run_set_explicit_callbacks_win_over_langfuse_default(monkeypatch)
     assert result == "fake-result"
     assert fake_graph.captured_configs[-1]["callbacks"] == []
     assert handler_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tracks_are_deduped_before_enrichment(monkeypatch):
+    """Two copies of the same track (normalized on artist/title) must be
+    deduped in n_parse before enrichment -- otherwise they'd score a perfect
+    1.0 edge against each other and get placed back-to-back (I4)."""
+    seen: dict = {}
+
+    async def fake_enrich_all(refs, cache):
+        seen["refs"] = list(refs)
+        tracks = [Track(ref=r, bpm=120, camelot="8A", energy=0.5) for r in refs]
+        return tracks, []
+
+    monkeypatch.setattr("musicagent.graph.enrich_all", fake_enrich_all)
+
+    await run_set("a t1, a t1 again, b t2", llm=DuplicateTracksLLM())
+
+    assert len(seen["refs"]) == 2
+    assert {(r.artist, r.title) for r in seen["refs"]} == {("a", "t1"), ("b", "t2")}
+
+
+@pytest.mark.asyncio
+async def test_resolved_but_unplaced_track_reported_as_omitted():
+    """A track that enriches fine but has no compatible edge to any other
+    track must show up in `omitted`, not silently vanish (I3)."""
+    engine = get_engine("sqlite:///:memory:")
+    init_db(engine)
+    cache = TrackCache(engine)
+    cache.put(
+        Track(ref=TrackRef(artist="a", title="t1"), bpm=128, camelot="8A", energy=0.3)
+    )
+    cache.put(
+        Track(ref=TrackRef(artist="b", title="t2"), bpm=128, camelot="9A", energy=0.7)
+    )
+    cache.put(
+        Track(
+            ref=TrackRef(artist="c", title="island"),
+            bpm=175,
+            camelot="3B",
+            energy=0.5,
+        )
+    )
+
+    result = await run_set(
+        "a t1, b t2, c island", cache=cache, llm=ThreeTrackWithIslandLLM()
+    )
+
+    assert result.unresolved == []
+    assert [r.title for r in result.omitted] == ["island"]
+
+
+@pytest.mark.asyncio
+async def test_duration_min_trims_set_from_end_and_reports_omitted():
+    """duration_min trims tracks from the end of the path once the summed
+    duration exceeds the budget, keeping at least 2 tracks; trimmed tracks
+    are reported as omitted, not silently dropped (I6)."""
+    engine = get_engine("sqlite:///:memory:")
+    init_db(engine)
+    cache = TrackCache(engine)
+    cache.put(
+        Track(
+            ref=TrackRef(artist="a", title="t1"),
+            bpm=120,
+            camelot="8A",
+            energy=0.2,
+            duration_s=200,
+        )
+    )
+    cache.put(
+        Track(
+            ref=TrackRef(artist="b", title="t2"),
+            bpm=120,
+            camelot="8A",
+            energy=0.5,
+            duration_s=200,
+        )
+    )
+    cache.put(
+        Track(
+            ref=TrackRef(artist="c", title="t3"),
+            bpm=120,
+            camelot="8A",
+            energy=0.8,
+            duration_s=200,
+        )
+    )
+
+    # 3 * 200s = 600s = 10min, well over the 5min budget.
+    result = await run_set(
+        "a t1, b t2, c t3, keep it around 5 minutes",
+        cache=cache,
+        llm=DurationCappedLLM(),
+    )
+
+    assert len(result.transitions) == 1
+    assert [r.title for r in result.omitted] == ["t3"]
