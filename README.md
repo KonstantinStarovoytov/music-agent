@@ -64,10 +64,13 @@ network/LLM):
 - Camelot compatibility: same key, ±1 on the wheel, or the relative
   major/minor.
 - BPM window: ±6% (configurable constant).
-- Edge score: weighted sum of key compatibility, BPM distance, and energy
-  delta vs. the target curve.
-- Path search: greedy beam search over the transition graph targeting an
-  energy shape (`build`, `peak_end`, `wave`).
+- Edge score: weighted sum of key compatibility, BPM distance, and the
+  energy delta *between the two adjacent tracks*.
+- Path search: greedy beam search over the transition graph, scoring each
+  candidate track by its edge score plus a separate term for how close its
+  energy is to the target curve for the requested shape (`build`,
+  `peak_end`, `wave`) at that position -- two different energy comparisons
+  doing two different jobs (local smoothness vs. overall arc).
 
 **Enrichment cascade** (`src/musicagent/enrichment.py`): per track, Deezer
 (no key required) → GetSongBPM for BPM/key, with tags/genre from Last.fm.
@@ -185,7 +188,7 @@ From [`.env.example`](.env.example):
 | `DATABASE_URL` | **required** | Postgres (Supabase) in prod, or any SQLAlchemy URL (e.g. `sqlite:////tmp/musicagent.db`) locally/in tests |
 | `LASTFM_API_KEY` | for full enrichment | Tags / genre / similar artists |
 | `GETSONGBPM_API_KEY` | for full enrichment | BPM/key fallback after Deezer |
-| `SITE_ORIGIN` | optional | Restricts CORS to this origin; defaults to `*` if unset |
+| `SITE_ORIGIN` | recommended | Allows CORS from this origin; with none set, CORS is closed (no cross-origin access at all) |
 
 Deezer and MusicBrainz need no key. MusicBrainz is not currently used (see
 limitations below).
@@ -195,13 +198,24 @@ limitations below).
 - The enrichment cascade is **Deezer → GetSongBPM**, with tags from
   Last.fm. MusicBrainz/AcousticBrainz as a further BPM/key fallback is
   designed but deferred to phase 2 (spec §3, §8).
-- **No auth** — the API is a public portfolio demo; rate limiting, if any,
-  happens at the platform level (spec §9).
+- **No auth** — the API is a public portfolio demo. `POST /sets` has a
+  small in-process rate limit (5 requests/minute per client host); a real
+  multi-instance deployment would still want rate limiting at the platform
+  level too (spec §9).
 - Request body is capped at **4000 characters** of free text and the parsed
   track list is capped at **30 tracks** per request (excess tracks are
   truncated with a `notice` in the response, not rejected).
 - No audio file analysis and no Spotify integration by design (audio
   features API closed to new apps since Nov 2024) — see spec §9.
+- A longer set always beats a shorter one in the pathfinder's search (it
+  prefers path length over score, see `find_path`), so `energy_shape` is a
+  preference that shapes *which* tracks and *what order*, not a guarantee
+  that the returned arc will closely track the target curve -- especially
+  on a small or poorly-connected track pool.
+- No DB migrations: `init_db` calls `metadata.create_all`, which only
+  creates missing tables/columns, it doesn't alter existing ones. The first
+  schema change made against a live (non-empty) database needs a manual
+  migration, not just a code change.
 
 ## What's next
 

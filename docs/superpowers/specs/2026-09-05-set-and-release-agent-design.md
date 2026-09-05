@@ -50,11 +50,14 @@ in code must match this table (enforced by spec-sync skill).
 ### Deterministic rules (never LLM)
 - Camelot compatibility: same key, ±1 on the wheel, relative major/minor.
 - BPM window: ±6% (configurable constant).
-- Edge score: weighted sum of key compatibility, BPM distance, energy delta
-  vs. the target curve.
-- Path search: greedy beam search over the transition graph targeting an
-  energy shape (`build`, `peak_end`, `wave`); returns best-scoring
-  Hamiltonian-ish path over resolved tracks (not required to include all).
+- Edge score: weighted sum of key compatibility, BPM distance, and the
+  energy delta between the two adjacent tracks.
+- Path search: greedy beam search over the transition graph, scoring each
+  candidate by its edge score plus a separate term for closeness to the
+  target energy curve for the requested shape (`build`, `peak_end`,
+  `wave`) at that position -- these are two distinct energy comparisons.
+  Returns best-scoring Hamiltonian-ish path over resolved tracks (not
+  required to include all).
 
 ### Enrichment cascade
 Per track: Deezer (no key needed) → GetSongBPM; tags/genre from Last.fm.
@@ -67,16 +70,18 @@ fallback is deferred to phase 2 (see section 8).
 
 - `tracks`: id, artist, title, bpm, musical_key, camelot, energy, duration_s,
   tags jsonb, source, fetched_at. Unique on (artist, title) normalized.
-- `sets`: id, request jsonb, track_order jsonb, explanations jsonb,
-  created_at. Stored so the site demo can replay real past sets.
+- `sets`: id, request jsonb (the raw request, including the truncation
+  `notice` if any), result jsonb (the full `SetResult`), created_at. Stored
+  so the site demo can replay real past sets.
 
 Phase 2 adds pgvector tables (pitch corpus embeddings).
 
 ## 5. API (FastAPI)
 
 - `POST /sets` — body: track list + preferences; responds with SSE stream of
-  progress events (`enriching 8/15`, `building graph`, `path found`) ending
-  with the `SetResult`.
+  `progress` events, one per graph node (bare node name as the data, e.g.
+  `parse_input`, `enrich_tracks`, `build_transition_graph`, `find_set_path`,
+  `explain_set`), ending with a `result` event carrying the `SetResult`.
 - `GET /sets/{id}` — replay a stored set.
 - `GET /health`.
 - CORS restricted to the portfolio site domain.
