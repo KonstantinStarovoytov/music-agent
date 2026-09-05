@@ -141,7 +141,10 @@ async def _deezer(client: httpx.AsyncClient, ref: TrackRef) -> dict:
     # instead of taking 0 BPM as a real reading.
     if track_data.get("bpm"):
         out["bpm"] = float(track_data["bpm"])
-    if track_data.get("gain") is not None:
+    # Deezer returns gain=0 when loudness is unknown (verified against the
+    # live API), the same sentinel convention as bpm=0 above; treat it as
+    # missing rather than as the maximum-energy real gain value of 0 dB.
+    if track_data.get("gain"):
         out["energy"] = min(max((track_data["gain"] + 20) / 20, 0.0), 1.0)
     return out
 
@@ -344,7 +347,18 @@ async def _enrich_one_inner(
                 preview_url = got.pop("preview_url", None)
         name = _PROVIDER_NAMES[provider]
         for k, v in got.items():
-            if k not in merged:
+            # Every field but `energy` follows first-writer-wins: the cascade
+            # order already encodes precedence (e.g. Deezer's bpm is
+            # authoritative metadata and must not be displaced by a later
+            # provider's guess). `energy` is the deliberate exception --
+            # Deezer's gain-derived value and AcousticBrainz's loudness proxy
+            # are both crude stand-ins, whereas `_audio` is a direct
+            # measurement of the actual preview clip, so it must win
+            # regardless of what an earlier provider already set.
+            if k == "energy":
+                if provider is _audio or "energy" not in merged:
+                    merged["energy"] = v
+            elif k not in merged:
                 merged[k] = v
                 if k in ("bpm", "camelot"):
                     field_source[k] = name

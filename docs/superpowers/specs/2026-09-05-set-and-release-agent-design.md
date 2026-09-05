@@ -78,13 +78,33 @@ underground ones almost entirely: measured on a real 15-track underground
 techno playlist, MusicBrainz/AcousticBrainz resolved 0/15 and Deezer's own
 metadata supplied bpm for 7 and never a key — but 13/15 of those tracks have
 a public 30-second preview clip on Deezer, and analysing that clip supplies
-key, bpm, and an energy proxy for any of them. It reuses the preview URL
+key, bpm, and energy for any of them. It reuses the preview URL
 (`hit["preview"]`) already present on the Deezer `/search` hit `_deezer`
 fetches, rather than searching Deezer a second time. Per track it costs
 roughly ~0.75s (download + ffmpeg decode + essentia analysis, measured) —
 well under the MusicBrainz throttle's 1.1s/track alone — and Essentia's
 `KeyExtractor`/`RhythmExtractor2013` supply the key/bpm; `key_confidence` is
 set from Essentia's key strength the same way it is for AcousticBrainz.
+
+**Energy is measured from this same clip, not read from Deezer's replay
+gain.** `analyze_preview` combines two Essentia readings into a heuristic
+0..1 energy score: integrated loudness (`LoudnessEBUR128`, EBU R128,
+normalised from an LUFS range calibrated by measurement — see
+`src/musicagent/audio.py` module constants) weighted 0.6, and onset rate
+(`OnsetRate`, onsets/second, capped and normalised the same way) weighted
+0.4. This is a heuristic proxy for perceived intensity, not a physical
+quantity — the floor/ceiling/cap/weights were chosen by measuring both raw
+features across 8 real tracks and picking values that gave a sensible
+spread (0.49-0.74) rather than clustering near 0 or 1. It is a direct
+measurement of the actual clip, so in the enrichment merge it wins for
+`energy` specifically regardless of provider order (unlike `bpm`/`camelot`,
+which stay strict first-writer-wins — see below); Deezer's `gain` field
+(replay gain, `(gain + 20) / 20`, clamped) is used only as a fallback when
+audio analysis doesn't run or fails, and AcousticBrainz's
+`lowlevel.average_loudness` remains the last-resort energy proxy below.
+Deezer returns `gain = 0` when loudness is unknown (the same sentinel
+convention as `bpm = 0`), so that case is treated as no energy contribution,
+not as the real (maximum-energy) value 0 dB would imply.
 
 Both `essentia` (the DSP/ML library doing the analysis) and the `ffmpeg`
 binary it depends on for mp3 decoding are optional at runtime: `essentia` is

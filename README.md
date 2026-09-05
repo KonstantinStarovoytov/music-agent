@@ -83,14 +83,30 @@ releases well but miss underground ones almost entirely — measured on a real
 0/15 and Deezer's metadata gave bpm for 7 tracks and never a key, but 13/15
 had a public preview clip on Deezer. Analysing that clip (via
 [essentia](https://essentia.upf.edu/)'s `KeyExtractor` + `RhythmExtractor2013`,
-after an `ffmpeg` decode to mono/44.1kHz wav) gives key, bpm, and an energy
-proxy for anything Deezer carries at all. It's optional at runtime — `essentia`
+after an `ffmpeg` decode to mono/44.1kHz wav) gives key, bpm, and energy for
+anything Deezer carries at all. It's optional at runtime — `essentia`
 is a separate `audio` dependency extra (not installed by default; importing
 it costs ~190MB RSS) and `ffmpeg` can't come from pip — so a deployment
 without either just runs on the metadata providers, no crash. Key detection
 this way is roughly 70-80% accurate, same as AcousticBrainz's, which is why
 `Track.key_confidence` is populated from it too. See Limitations below for
 the caveat on Deezer's terms of use.
+
+**Energy is measured from the preview clip, not read off Deezer's replay
+gain.** `analyze_preview` blends two Essentia readings into a 0..1 score:
+integrated loudness (`LoudnessEBUR128`) weighted 60%, and onset rate
+(`OnsetRate`, onsets/second — a proxy for rhythmic density) weighted 40%,
+each normalised against a range calibrated by measuring 8 real tracks (see
+the constants and comments in `src/musicagent/audio.py`). This is a
+heuristic proxy for perceived intensity, not a physical quantity. Because
+it's a direct measurement of the actual clip, it takes precedence over
+every other energy source in the enrichment merge — Deezer's `gain` field
+(`(gain + 20) / 20`, clamped, with `gain == 0` treated as "unknown" the same
+way Deezer's `bpm == 0` sentinel is) is only used as a fallback when audio
+analysis doesn't run (e.g. no preview clip) or fails, and
+AcousticBrainz's `lowlevel.average_loudness` remains the last-resort proxy
+below that. `bpm`/`camelot` are unaffected by this and keep strict
+first-writer-wins provider precedence.
 
 MusicBrainz/AcousticBrainz needs no API key: MusicBrainz recording search
 finds candidate MBIDs, then a single batch AcousticBrainz lookup (all

@@ -421,6 +421,51 @@ async def test_deezer_track_bpm_zero_falls_through_to_next_provider():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_deezer_gain_zero_contributes_no_energy():
+    """Deezer returns gain=0 when loudness is unknown (verified against the live
+    api.deezer.com/track/{id} endpoint), the same sentinel convention as bpm=0.
+    That must not be read as 0 dB (the maximum-energy end of the mapping) --
+    it should contribute no energy at all, while the track still resolves
+    normally via the other fields/providers."""
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track(json={"id": 3135556, "bpm": 126.0, "gain": 0, "duration": 240})
+    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.bpm == 126.0
+    assert track.camelot == "8A"
+    # No provider supplied energy, so the model's default applies -- not the
+    # 1.0 the old (gain + 20) / 20 mapping would have produced for gain=0.
+    assert track.energy == 0.5
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_deezer_negative_gain_still_maps_to_energy():
+    """A real (negative) gain reading still maps to energy the same way as
+    before this fix -- only the gain=0 sentinel is now treated as unknown."""
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
+    mock_deezer_track(json={"id": 3135556, "bpm": 126.0, "gain": -8.0, "duration": 240})
+    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.energy == pytest.approx((-8.0 + 20) / 20)
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_deezer_track_lookup_failure_falls_through_without_crash():
     """If /search succeeds but /track/{id} fails (network error, 500, etc), Deezer
     must contribute nothing and the cascade must fall through to GetSongBPM."""
@@ -717,6 +762,43 @@ async def test_audio_analysis_supplies_key_deezer_supplies_bpm(monkeypatch):
     assert track.camelot == "3A"
     assert track.key_confidence == pytest.approx(0.74)
     assert "deezer" in track.source and "audio" in track.source
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_audio_energy_overrides_deezer_gain_energy(monkeypatch):
+    """Deezer supplies a gain-derived energy, but audio analysis of the actual
+    preview clip is a direct measurement and must win for `energy` -- while
+    Deezer's bpm (authoritative metadata) still wins over audio's bpm, since
+    only the energy field's precedence changes."""
+    monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
+    respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
+        json=DEEZER_SEARCH_WITH_PREVIEW
+    )
+    # gain=-8.0 -> (−8+20)/20 = 0.6, a real (non-sentinel) Deezer energy
+    # reading that audio analysis must still override.
+    mock_deezer_track(json={"id": 3135556, "bpm": 126.0, "gain": -8.0, "duration": 240})
+    respx.get(url__regex=PREVIEW_ROUTE_RE).respond(200, content=b"fake mp3 bytes")
+    respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
+        json={"toptags": {"tag": []}}
+    )
+    monkeypatch.setattr(
+        "musicagent.audio.analyze_preview",
+        lambda mp3_bytes: {
+            "bpm": 129.0,
+            "camelot": "3A",
+            "key_confidence": 0.74,
+            "energy": 0.71,
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        track = await enrich_one(
+            TrackRef(artist="Bicep", title="Glue"), client, cache=None
+        )
+    assert track is not None
+    assert track.bpm == 126.0  # Deezer's bpm still wins
+    assert track.camelot == "3A"
+    assert track.energy == pytest.approx(0.71)  # audio's measurement wins
 
 
 @pytest.mark.asyncio
