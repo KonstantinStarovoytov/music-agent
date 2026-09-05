@@ -42,8 +42,11 @@ below, write one short explanation of why the transition works (key relationship
 Camelot wheel, BPM closeness, energy movement). Then a 1-2 sentence summary of the set arc.
 Some tracks show a key confidence (0-1, from algorithmic key detection); when it's low
 (below ~0.5), hedge the key claim in your explanation instead of stating it flatly.
-If any tracks could not be resolved or were left out, briefly mention them in the summary
-in plain language, using only the reasons given below -- never invent a different reason.
+If a list of unresolved or left-out tracks appears below, briefly mention those tracks in
+the summary in plain language, using only the reasons given there -- never invent a
+different reason. If no such list appears, every track the user gave made it into the set:
+say nothing about tracks being skipped, dropped or left out, and do not speculate that any
+were. Claiming omissions that did not happen is worse than saying nothing.
 Return exactly {n} explanations, in order.
 
 Tracks (in play order, with camelot/bpm/energy):

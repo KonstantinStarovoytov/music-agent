@@ -180,15 +180,18 @@ Once `.env` is filled in (`OPENAI_API_KEY` or a Luna endpoint, and either a
 uv run uvicorn --factory musicagent.api:get_app --port 8123
 ```
 
-`POST /sets` streams progress over SSE and ends with a `SetResult`. The
-tracks below are verified against the live Deezer/audio-analysis cascade
-(4/4 resolved in ~3.4s) — unlike a made-up track list, this one actually
-comes back with a full set instead of an empty one:
+`POST /sets` streams progress over SSE and ends with a `SetResult`. The track
+list below was run against the live cascade: all seven resolve, and they
+happen to form one continuous harmonic chain (10A → 10A → 9A → 8A → 7A →
+6A → 6B), so the response is a full six-transition set rather than an empty
+one. Resolving alone is not enough for a set — tracks also have to be
+compatible with each other, which is why this example was picked by actually
+running it rather than by looking plausible:
 
 ```bash
 curl -N -X POST http://127.0.0.1:8123/sets \
   -H 'Content-Type: application/json' \
-  -d '{"text": "Build me a peak-time set from: Adriatique - Deep In The Three, Tale Of Us - Astral, Massano - The Feeling, Innellea - Downfall"}'
+  -d '{"text": "Build a set that builds energy from: Tale Of Us - Nova Two, Innellea - Inside Your Mind, Massano - The Feeling, Kolsch - Grey, Innellea - Downfall, Overmono - So U Kno, Rufus Du Sol - Innerbloom"}'
 ```
 
 ```
@@ -209,6 +212,22 @@ data: explain_set
 
 event: result
 data: {"set_id": "…", "result": {"transitions": [...], "summary": "...", "unresolved": [], "omitted": []}}
+```
+
+The transitions that come back for that request read like this (abridged —
+one entry per consecutive pair, in play order):
+
+```
+Tale Of Us - Nova Two  ->  Innellea - Inside Your Mind
+    Close BPM (125 to 124) and a significant energy lift, 0.40 to 0.85.
+
+Massano - The Feeling  ->  Kolsch - Grey
+    A step down the wheel, 9A to 8A, BPM steady at ~124, energy easing to
+    0.39 for a deeper moment.
+
+Overmono - So U Kno  ->  Rufus Du Sol - Innerbloom
+    6A to 6B — same position, relative major — with the BPM settling to 122
+    and energy down to 0.45 for an atmospheric close.
 ```
 
 Replay a saved set:
