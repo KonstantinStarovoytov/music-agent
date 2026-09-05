@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run:*)",
+      "Bash(uv add:*)",
+      "Bash(uv sync:*)",
+      "Bash(ruff:*)",
+      "Bash(pytest:*)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Edit(.env)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); if [[ \"$f\" == *.py ]]; then cd \"$CLAUDE_PROJECT_DIR\" && uv run ruff format \"$f\" >/dev/null 2>&1; uv run ruff check --fix \"$f\" >/dev/null 2>&1; fi; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,1 @@
+docs/superpowers/specs/2026-09-05-set-and-release-agent-design.md
