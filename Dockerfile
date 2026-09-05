@@ -35,4 +35,17 @@ EXPOSE 8123
 
 # DATABASE_URL, OPENAI_API_KEY, etc. are supplied by the host's environment
 # config, not baked into the image -- see README's environment variable table.
-CMD ["uvicorn", "--factory", "musicagent.api:get_app", "--host", "0.0.0.0", "--port", "8123"]
+#
+# Shell form (not the JSON array) so ${PORT} expands: managed hosts inject the
+# port to listen on rather than letting the image choose it (Cloud Run defaults
+# to 8080, Render sets PORT), and a container that ignores it is treated as
+# failing its health check. 8123 is only the local fallback.
+#
+# --forwarded-allow-ips: behind the host's edge proxy, request.client.host is
+# the proxy, not the visitor, so without this every caller would share one
+# bucket in the rate limiter (see RATE_LIMIT_* in api.py). "*" is right here
+# because the only route to this container is through that trusted proxy.
+# `exec` so uvicorn replaces the shell as PID 1 and receives SIGTERM directly:
+# without it the shell holds PID 1, swallows the host's stop signal, and the
+# container is SIGKILLed after the grace period instead of shutting down.
+CMD ["sh", "-c", "exec uvicorn --factory musicagent.api:get_app --host 0.0.0.0 --port ${PORT:-8123} --forwarded-allow-ips='*'"]
