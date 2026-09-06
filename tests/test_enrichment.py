@@ -7,7 +7,7 @@ import respx
 
 import musicagent.enrichment as enrichment_mod
 from musicagent.db import TrackCache, get_engine, init_db
-from musicagent.enrichment import enrich_all, enrich_one
+from musicagent.enrichment import _getsongbpm, enrich_all, enrich_one
 from musicagent.models import Track, TrackRef, UnresolvedTrack
 
 # Search hit shape verified against the live api.deezer.com/search endpoint:
@@ -59,7 +59,7 @@ def fast_retries(monkeypatch):
 async def test_enrich_one_deezer_bpm_gsb_key():
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track()
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": [{"name": "electronic"}]}}
     )
@@ -92,7 +92,7 @@ async def test_no_bpm_reason_when_key_found_but_no_tempo(monkeypatch):
     tempo, must be reported unresolved with reason "no_bpm" (key known, tempo
     unknown) -- the mirror image of the "no_key" case."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json={"data": []})
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(
         json={"search": [{"key_of": "Am"}]}
     )
     respx.get(url__regex=r"musicbrainz\.org.*").respond(json={"recordings": []})
@@ -174,7 +174,7 @@ async def test_provider_500_retries_then_falls_through():
     """A provider returning HTTP 500 must retry (RETRIES=2 -> 3 attempts total) then fall
     through to the next provider rather than crashing enrichment."""
     deezer_route = respx.get(url__regex=r"api\.deezer\.com/search.*").respond(500)
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -196,7 +196,7 @@ async def test_provider_malformed_json_retries_then_falls_through():
     deezer_route = respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
         200, content="not json"
     )
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -212,7 +212,7 @@ async def test_provider_malformed_json_retries_then_falls_through():
 @respx.mock
 async def test_all_providers_fail_marks_unresolved_not_crash():
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(500)
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(500)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(500)
     respx.get(url__regex=r"musicbrainz\.org.*").respond(500)
     async with httpx.AsyncClient() as client:
         track = await enrich_one(
@@ -242,7 +242,7 @@ async def test_enrich_all_partial_failure_does_not_fail_batch():
         side_effect=deezer_side_effect
     )
     mock_deezer_track()
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").mock(side_effect=gsb_side_effect)
+    respx.get(url__regex=r"api\.getsong\.co.*").mock(side_effect=gsb_side_effect)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -270,7 +270,7 @@ async def test_missing_getsongbpm_key_skips_provider_without_crash(monkeypatch):
     monkeypatch.delenv("GETSONGBPM_API_KEY", raising=False)
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track()
-    gsb_route = respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    gsb_route = respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"musicbrainz\.org.*").respond(json={"recordings": []})
     async with httpx.AsyncClient() as client:
         track = await enrich_one(
@@ -291,7 +291,7 @@ async def test_missing_lastfm_key_yields_empty_tags_without_crash(monkeypatch):
     monkeypatch.delenv("LASTFM_API_KEY", raising=False)
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track()
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     lastfm_route = respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": [{"name": "electronic"}]}}
     )
@@ -313,7 +313,7 @@ async def test_resolved_track_written_to_cache_and_second_call_skips_network():
         json=DEEZER_SEARCH
     )
     deezer_track_route = mock_deezer_track()
-    gsb_route = respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    gsb_route = respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     lastfm_route = respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -352,7 +352,7 @@ async def test_provider_returns_json_list_falls_through_without_crash():
     """A provider returning a valid JSON list (not an object) must be treated like a
     failed response, not crash with AttributeError."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(200, json=[1, 2, 3])
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -371,7 +371,7 @@ async def test_provider_returns_json_string_falls_through_without_crash():
     """A provider returning a bare JSON string must also be treated as a failed
     response rather than crashing when callers do `.get(...)` on it."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(200, json="oops")
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -390,7 +390,7 @@ async def test_lastfm_single_tag_returned_as_bare_dict():
     """Last.fm's real API quirk: a single tag comes back as a dict, not a list."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track()
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": {"name": "electronic"}}}
     )
@@ -408,7 +408,7 @@ async def test_lastfm_items_missing_name_are_skipped():
     """Tag items lacking a usable 'name' must be skipped, not raise KeyError."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track()
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": [{"count": 5}, {"name": "electronic"}, "not-a-dict"]}}
     )
@@ -463,7 +463,7 @@ async def test_source_reflects_mixed_provenance_not_plain_deezer():
     gsb_key_only = {"search": [{"key_of": "Am"}]}
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track()
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=gsb_key_only)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=gsb_key_only)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -490,7 +490,7 @@ async def test_deezer_track_bpm_zero_falls_through_to_next_provider():
     and fall through to GetSongBPM, not taken as a real 0 BPM reading."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track(json={"id": 3135556, "bpm": 0, "gain": -8.0, "duration": 240})
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -515,7 +515,7 @@ async def test_deezer_gain_zero_contributes_no_energy():
     normally via the other fields/providers."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track(json={"id": 3135556, "bpm": 126.0, "gain": 0, "duration": 240})
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -538,7 +538,7 @@ async def test_deezer_negative_gain_still_maps_to_energy():
     before this fix -- only the gain=0 sentinel is now treated as unknown."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     mock_deezer_track(json={"id": 3135556, "bpm": 126.0, "gain": -8.0, "duration": 240})
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -557,7 +557,7 @@ async def test_deezer_track_lookup_failure_falls_through_without_crash():
     must contribute nothing and the cascade must fall through to GetSongBPM."""
     respx.get(url__regex=r"api\.deezer\.com/search.*").respond(json=DEEZER_SEARCH)
     deezer_track_route = mock_deezer_track(status_code=500)
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     respx.get(url__regex=r"ws\.audioscrobbler\.com.*").respond(
         json={"toptags": {"tag": []}}
     )
@@ -897,7 +897,7 @@ async def test_audio_analysis_skipped_when_already_resolved():
         json=DEEZER_SEARCH_WITH_PREVIEW
     )
     mock_deezer_track()
-    respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(json=GSB)
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(json=GSB)
     preview_route = respx.get(url__regex=PREVIEW_ROUTE_RE).respond(
         200, content=b"fake mp3 bytes"
     )
@@ -1055,3 +1055,48 @@ async def test_audio_analysis_concurrency_bounded(monkeypatch):
     assert unresolved == []
     assert max_seen <= enrichment_mod.AUDIO_ANALYSIS_CONCURRENCY
     assert max_seen == enrichment_mod.AUDIO_ANALYSIS_CONCURRENCY
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_getsongbpm_falls_back_to_title_search_and_matches_artist():
+    """`type=both` misses when their artist spelling differs from ours; the
+    title-only fallback must pick the hit whose folded artist name matches
+    (RÜFÜS ~ Rufus Du Sol) and skip an unrelated artist with the same title."""
+    route = respx.get(url__regex=r"api\.getsong\.co.*")
+    route.side_effect = [
+        httpx.Response(200, json={"search": {"error": "no result"}}),
+        httpx.Response(
+            200,
+            json={
+                "search": [
+                    {
+                        "title": "Innerbloom",
+                        "key_of": "C",
+                        "artist": {"name": "Someone"},
+                    },
+                    {
+                        "title": "Innerbloom",
+                        "key_of": "Gm",
+                        "artist": {"name": "RÜFÜS"},
+                    },
+                ]
+            },
+        ),
+    ]
+    async with httpx.AsyncClient() as client:
+        got = await _getsongbpm(
+            client, TrackRef(artist="Rufus Du Sol", title="Innerbloom")
+        )
+    assert got == {"camelot": "6A"}
+    assert route.calls[1].request.url.params["type"] == "song"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_getsongbpm_error_dict_is_a_miss_not_a_crash():
+    respx.get(url__regex=r"api\.getsong\.co.*").respond(
+        json={"search": {"error": "no result"}}
+    )
+    async with httpx.AsyncClient() as client:
+        assert await _getsongbpm(client, TrackRef(artist="X", title="Y")) == {}

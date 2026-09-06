@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import unicodedata
 
 import httpx
 
@@ -169,21 +170,47 @@ async def _deezer(client: httpx.AsyncClient, ref: TrackRef) -> dict:
     return out
 
 
+GETSONGBPM_URL = "https://api.getsong.co/search/"
+
+
+def _fold(name: str) -> str:
+    """Case- and diacritic-insensitive form of an artist name for matching
+    GetSongBPM's spelling against the user's (Kölsch == kolsch)."""
+    stripped = "".join(
+        ch
+        for ch in unicodedata.normalize("NFKD", name)
+        if not unicodedata.combining(ch)
+    )
+    return stripped.casefold().strip()
+
+
 async def _getsongbpm(client: httpx.AsyncClient, ref: TrackRef) -> dict:
     api_key = os.environ.get("GETSONGBPM_API_KEY")
     if not api_key:
         # Missing key: skip the provider entirely rather than making a doomed request.
         return {}
-    data = await _get_json(
-        client,
-        "https://api.getsongbpm.com/search/",
-        params={
-            "type": "both",
-            "lookup": f"song:{ref.title} artist:{ref.artist}",
-            "api_key": api_key,
-        },
-    )
-    items = (data or {}).get("search") or []
+
+    async def search(**query: str) -> list[dict]:
+        data = await _get_json(
+            client,
+            GETSONGBPM_URL,
+            params={**query, "api_key": api_key},
+        )
+        items = (data or {}).get("search")
+        # A miss is `{"search": {"error": "no result"}}` -- a dict, not a list.
+        return items if isinstance(items, list) else []
+
+    items = await search(type="both", lookup=f"song:{ref.title} artist:{ref.artist}")
+    if not items:
+        # Their artist spellings differ from ours (RÜFÜS vs Rufus Du Sol), so
+        # fall back to a title-only search and match the artist ourselves.
+        want = _fold(ref.artist)
+        items = [
+            hit
+            for hit in await search(type="song", lookup=ref.title)
+            if (got := _fold((hit.get("artist") or {}).get("name") or ""))
+            and (got in want or want in got)
+        ]
     if not items:
         return {}
     hit = items[0]

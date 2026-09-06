@@ -154,9 +154,7 @@ async def test_run_set_all_tracks_unresolved_still_returns_valid_result(monkeypa
     deezer_route = respx.get(url__regex=r"api\.deezer\.com/search.*").respond(
         json={"data": []}
     )
-    gsb_route = respx.get(url__regex=r"api\.getsongbpm\.com.*").respond(
-        json={"search": []}
-    )
+    gsb_route = respx.get(url__regex=r"api\.getsong\.co.*").respond(json={"search": []})
 
     engine = get_engine("sqlite:///:memory:")
     init_db(engine)
@@ -174,12 +172,13 @@ async def test_run_set_all_tracks_unresolved_still_returns_valid_result(monkeypa
     # Prove the path actually went through enrichment against the stubbed
     # providers (not e.g. short-circuited some other way).
     assert deezer_route.call_count == 2
-    assert gsb_route.call_count == 2
+    # A GetSongBPM miss costs two calls per track: `both`, then the title-only fallback.
+    assert gsb_route.call_count == 4
     # And that no unstubbed host was contacted: respx raises on any request
     # to a route it doesn't recognize when there's no catch-all, so reaching
     # this point with only the two routes above registered is itself proof.
     assert all(
-        call.request.url.host in {"api.deezer.com", "api.getsongbpm.com"}
+        call.request.url.host in {"api.deezer.com", "api.getsong.co"}
         for call in respx.calls
     )
 

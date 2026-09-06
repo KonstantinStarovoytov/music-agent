@@ -330,9 +330,9 @@ variables below (`OPENAI_API_KEY`, `DATABASE_URL` for Postgres, etc.) with
 
 - The enrichment cascade is **Deezer → GetSongBPM → audio analysis of the
   Deezer preview clip → MusicBrainz/AcousticBrainz**, with tags from Last.fm
-  (spec §3). GetSongBPM in practice rarely contributes a key: its API
-  requires a public backlink to the site that isn't in place, so that step is
-  effectively skipped.
+  (spec §3). GetSongBPM supplies human-published keys for catalogued
+  releases; it needs `GETSONGBPM_API_KEY` and a backlink on the calling site
+  (the portfolio footer has one), otherwise that step is skipped.
 - **Coverage is uneven by release type, which is exactly why audio analysis
   exists.** Measured against the live APIs on the same underground techno
   playlist: 6/6 resolved on a mainstream electronic/rock sample via metadata
