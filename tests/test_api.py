@@ -61,7 +61,8 @@ async def test_health_and_post_sets_stream():
         "energy": 0.3,
     }
     edges = by_node["build_transition_graph"]["edges"]
-    assert edges and {"a", "b", "score"} == set(edges[0])
+    assert edges and {"a", "b", "score", "energy_delta", "label"} == set(edges[0])
+    assert {e["label"] for e in edges} == {"energy boost +", "energy drop -"}
     assert sorted(by_node["find_set_path"]["order"]) == [0, 1]
     assert by_node["explain_set"] == {}
 

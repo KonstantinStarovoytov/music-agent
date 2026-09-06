@@ -131,7 +131,13 @@ def progress_snapshot(node: str, state: dict) -> dict:
     if node == "build_transition_graph":
         return {
             "edges": [
-                {"a": e.a, "b": e.b, "score": round(e.score, 3)}
+                {
+                    "a": e.a,
+                    "b": e.b,
+                    "score": round(e.score, 3),
+                    "energy_delta": e.energy_delta,
+                    "label": e.label,
+                }
                 for e in state["transition_graph"].edges
             ]
         }
