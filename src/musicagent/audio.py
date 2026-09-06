@@ -97,6 +97,38 @@ def _warn_once(message: str) -> None:
         _warned_unavailable = True
 
 
+# Essentia key profiles voted over in analyze_preview (spec section 3, "Key
+# mode voting"). `edma` is tuned for electronic dance music; the others are
+# general-purpose profiles that disagree with it mostly on major-vs-minor,
+# which is exactly the ambiguity the vote is there to expose.
+KEY_PROFILES = ("edma", "bgate", "braw", "krumhansl")
+# Applied to key_confidence when the profiles agree on the Camelot number but
+# split on the mode, on top of the number's vote share.
+AMBIGUOUS_MODE_PENALTY = 0.7
+
+
+def vote_key(votes: list[tuple[str, float]]) -> tuple[str, float, bool] | None:
+    """Combine per-profile (camelot, strength) readings into one
+    (camelot, confidence, mode_ambiguous). Pure; see spec for the rules:
+    majority on the Camelot number, then unanimous mode or else minor with a
+    penalty. Returns None for no votes."""
+    if not votes:
+        return None
+    by_number: dict[str, list[tuple[str, float]]] = {}
+    for camelot, strength in votes:
+        by_number.setdefault(camelot[:-1], []).append((camelot[-1], strength))
+    number, group = max(
+        by_number.items(),
+        key=lambda kv: (len(kv[1]), sum(s for _, s in kv[1])),
+    )
+    share = len(group) / len(votes)
+    mean_strength = sum(s for _, s in group) / len(group)
+    modes = {mode for mode, _ in group}
+    if len(modes) == 1:
+        return f"{number}{modes.pop()}", mean_strength * share, False
+    return f"{number}A", mean_strength * share * AMBIGUOUS_MODE_PENALTY, True
+
+
 def analyze_preview(mp3_bytes: bytes) -> dict:
     """Decode an mp3 preview clip and estimate its musical key and BPM.
 
@@ -162,7 +194,13 @@ def analyze_preview(mp3_bytes: bytes) -> dict:
 
         try:
             y = es.MonoLoader(filename=wav_path, sampleRate=44100)()
-            key, scale, strength = es.KeyExtractor(profileType="edma")(y)
+            votes: list[tuple[str, float]] = []
+            for profile in KEY_PROFILES:
+                key, scale, strength = es.KeyExtractor(profileType=profile)(y)
+                try:
+                    votes.append((parse_camelot(f"{key} {scale}"), float(strength)))
+                except ValueError:
+                    pass  # this profile's reading didn't parse; skip its vote
             bpm = es.RhythmExtractor2013(method="multifeature")(y)[0]
         except Exception:
             logger.warning("essentia analysis of preview clip failed", exc_info=True)
@@ -174,9 +212,15 @@ def analyze_preview(mp3_bytes: bytes) -> dict:
     out: dict = {"bpm": float(bpm)}
     if energy is not None:
         out["energy"] = energy
-    try:
-        out["camelot"] = parse_camelot(f"{key} {scale}")
-        out["key_confidence"] = float(strength)
-    except ValueError:
-        pass  # unparseable key: bpm alone is still useful, camelot stays absent
+    if voted := vote_key(votes):
+        camelot, confidence, ambiguous = voted
+        out["camelot"] = camelot
+        out["key_confidence"] = confidence
+        if ambiguous:
+            logger.info(
+                "key mode ambiguous (%s): profiles split %s, reporting minor",
+                camelot,
+                votes,
+            )
+    # else: no profile produced a parseable key; bpm alone is still useful.
     return out

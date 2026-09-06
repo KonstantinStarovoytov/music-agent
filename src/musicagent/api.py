@@ -120,7 +120,13 @@ def progress_snapshot(node: str, state: dict) -> dict:
     if node == "enrich_tracks":
         return {
             "tracks": [
-                {**_ref(t.ref), "bpm": t.bpm, "camelot": t.camelot, "energy": t.energy}
+                {
+                    **_ref(t.ref),
+                    "bpm": t.bpm,
+                    "camelot": t.camelot,
+                    "energy": t.energy,
+                    "key_confidence": t.key_confidence,
+                }
                 for t in state["tracks"]
             ],
             "unresolved": [

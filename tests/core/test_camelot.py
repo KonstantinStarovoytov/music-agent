@@ -84,8 +84,8 @@ def test_parse_unknown_raises():
         ("8A", "9A", True),  # +1 (boost +)
         ("8A", "7A", True),  # -1 (drop -)
         ("12A", "1A", True),  # wheel wraps
-        ("8A", "8B", True),  # boost + (not the relative key!)
-        ("8A", "7B", True),  # relative major
+        ("8A", "8B", True),  # boost + (the true relative major, per the chart)
+        ("8A", "7B", True),  # the chart's second perfect match
         ("8A", "10A", True),  # boost +++ (diagonal)
         ("8A", "9B", False),
         ("8A", "3B", False),

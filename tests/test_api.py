@@ -59,6 +59,7 @@ async def test_health_and_post_sets_stream():
         "bpm": 128.0,
         "camelot": "8A",
         "energy": 0.3,
+        "key_confidence": None,
     }
     edges = by_node["build_transition_graph"]["edges"]
     assert edges and {"a", "b", "score", "energy_delta", "label"} == set(edges[0])

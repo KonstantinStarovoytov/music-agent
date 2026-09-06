@@ -85,12 +85,12 @@ NONE = Transition(0.0, 0, "none")
 # The standard harmonic-mixing transition table (spec section 3), keyed on
 # (letter of the source key, letter of the target key, (target - source) mod 12).
 # Directed: 8A -> 9A is a boost, 9A -> 8A is a drop. The rows for A and B keys
-# differ (e.g. the relative key is (n-1)B from nA but (n+1)A from nB), so both
+# differ (the chart pairs nA with (n-1)B but nB with (n+1)A), so both
 # are spelled out rather than derived from one formula.
 _TABLE: dict[tuple[str, str, int], Transition] = {
     # from a minor (A) key
     ("A", "A", 0): Transition(1.0, 0, "perfect match"),
-    ("A", "B", 11): Transition(1.0, 0, "perfect match"),  # relative major
+    ("A", "B", 11): Transition(1.0, 0, "perfect match"),  # e.g. 8A -> 7B
     ("A", "B", 0): Transition(0.85, 1, "energy boost +"),
     ("A", "A", 1): Transition(0.85, 1, "energy boost +"),
     ("A", "A", 9): Transition(0.6, 2, "energy boost ++"),
@@ -103,7 +103,7 @@ _TABLE: dict[tuple[str, str, int], Transition] = {
     ("A", "B", 3): Transition(0.5, 0, "mood change"),
     # from a major (B) key
     ("B", "B", 0): Transition(1.0, 0, "perfect match"),
-    ("B", "A", 1): Transition(1.0, 0, "perfect match"),  # relative minor
+    ("B", "A", 1): Transition(1.0, 0, "perfect match"),  # e.g. 7B -> 8A
     ("B", "B", 1): Transition(0.85, 1, "energy boost +"),
     ("B", "B", 9): Transition(0.6, 2, "energy boost ++"),
     ("B", "B", 2): Transition(0.5, 3, "energy boost +++"),

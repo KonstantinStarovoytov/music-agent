@@ -3,7 +3,12 @@ import types
 
 import pytest
 
-from musicagent.audio import _energy_from_features, analyze_preview
+from musicagent.audio import (
+    AMBIGUOUS_MODE_PENALTY,
+    _energy_from_features,
+    analyze_preview,
+    vote_key,
+)
 
 # Measured (LUFS, onsets/sec) -> expected energy pairs, from real tracks
 # (see musicagent.audio module docstring / bug report for calibration
@@ -109,3 +114,69 @@ def test_analyze_preview_energy_matches_measured_tracks(
 
     assert 0.0 <= result["energy"] <= 1.0
     assert round(result["energy"], 2) == expected
+
+
+# --- key mode voting (spec section 3, "Key mode voting") ---------------------
+
+
+def test_vote_key_unanimous_keeps_mode_and_mean_strength():
+    camelot, conf, ambiguous = vote_key(
+        [("6B", 0.86), ("6B", 0.89), ("6B", 0.90), ("6B", 0.92)]
+    )
+    assert (camelot, ambiguous) == ("6B", False)
+    assert conf == pytest.approx((0.86 + 0.89 + 0.90 + 0.92) / 4)
+
+
+def test_vote_key_mode_split_prefers_minor_with_penalty():
+    # Kolsch - Grey as measured: edma says 8A, three general profiles say 8B.
+    camelot, conf, ambiguous = vote_key(
+        [("8A", 0.78), ("8B", 0.82), ("8B", 0.81), ("8B", 0.83)]
+    )
+    assert (camelot, ambiguous) == ("8A", True)
+    mean = (0.78 + 0.82 + 0.81 + 0.83) / 4
+    assert conf == pytest.approx(mean * AMBIGUOUS_MODE_PENALTY)
+
+
+def test_vote_key_number_split_scales_confidence_by_share():
+    # Adriatique - Deep In The Three as measured: numbers all over the place.
+    camelot, conf, ambiguous = vote_key(
+        [("8B", 0.77), ("6A", 0.77), ("5A", 0.74), ("8B", 0.69)]
+    )
+    assert camelot == "8B" and ambiguous is False
+    assert conf == pytest.approx(((0.77 + 0.69) / 2) * 0.5)
+
+
+def test_vote_key_number_tie_breaks_on_strength():
+    camelot, _, _ = vote_key([("8B", 0.9), ("6A", 0.5), ("6A", 0.5), ("8B", 0.9)])
+    assert camelot == "8B"
+
+
+def test_vote_key_no_votes():
+    assert vote_key([]) is None
+
+
+def test_analyze_preview_votes_across_profiles(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: None)
+    _install_fake_essentia(monkeypatch, lufs=-10.0, onset_rate=3.0)
+
+    readings = {
+        "edma": ("A", "minor", 0.78),
+        "bgate": ("C", "major", 0.82),
+        "braw": ("C", "major", 0.81),
+        "krumhansl": ("C", "major", 0.83),
+    }
+
+    class _KeyExtractor:
+        def __init__(self, profileType):
+            self.profile = profileType
+
+        def __call__(self, y):
+            return readings[self.profile]
+
+    sys.modules["essentia.standard"].KeyExtractor = _KeyExtractor
+
+    result = analyze_preview(b"fake mp3 bytes")
+
+    assert result["camelot"] == "8A"
+    assert result["key_confidence"] < 0.78

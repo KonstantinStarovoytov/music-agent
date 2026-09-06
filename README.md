@@ -63,7 +63,7 @@ table exactly.
 network/LLM):
 - Camelot compatibility: the full harmonic-mixing transition table, and it
   is *directed* -- `8A -> 9A` is an "energy boost +", `9A -> 8A` an "energy
-  drop -". Perfect matches (same key, relative major/minor `8A <-> 7B`),
+  drop -". Perfect matches (same key, or the chart's `8A <-> 7B` pairing),
   boosts `+`/`++`/`+++`, drops `-`/`--`/`---` and mood changes each carry an
   affinity (how smooth) and an energy push (-3..+3). Anything not in the
   table gets no edge. See spec.md section 3 for the table.
