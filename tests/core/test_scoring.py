@@ -33,3 +33,30 @@ def test_build_edges_directed_and_filtered():
     pairs = {(e.a, e.b) for e in edges}
     assert (0, 1) in pairs and (1, 0) in pairs
     assert not any(0 in p and 2 in p for p in pairs)  # bpm too far
+
+
+def test_edges_carry_the_harmonic_push():
+    tracks = [t("a", 128, "8A"), t("b", 128, "9A"), t("c", 128, "5A")]
+    by_pair = {(e.a, e.b): e for e in build_edges(tracks)}
+    assert (by_pair[(0, 1)].energy_delta, by_pair[(0, 1)].label) == (
+        1,
+        "energy boost +",
+    )
+    assert (by_pair[(1, 0)].energy_delta, by_pair[(1, 0)].label) == (
+        -1,
+        "energy drop -",
+    )
+    assert (by_pair[(0, 2)].energy_delta, by_pair[(0, 2)].label) == (
+        2,
+        "energy boost ++",
+    )
+    assert (by_pair[(2, 0)].energy_delta, by_pair[(2, 0)].label) == (
+        -2,
+        "energy drop --",
+    )
+    # The score is direction-agnostic; only the push differs.
+    assert by_pair[(0, 1)].score == by_pair[(1, 0)].score
+
+
+def test_far_wheel_transitions_still_make_no_edge():
+    assert edge_score(t("a", 128, "8A"), t("b", 128, "2A")) == 0.0

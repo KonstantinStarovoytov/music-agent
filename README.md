@@ -22,7 +22,7 @@ isn't*:
   track list (`parse_input`), and turning a computed set order into
   human-readable transition explanations (`explain_set`).
 - **Everything about the music itself is deterministic, unit-tested Python**
-  — Camelot wheel neighbor rules, the BPM compatibility window, the energy
+  — the Camelot harmonic-mixing table, the BPM compatibility window, the energy
   curve, and the beam search that finds the best playable order. None of
   that is delegated to a model: it's cheaper, faster, reproducible, and
   actually testable.
@@ -61,15 +61,21 @@ table exactly.
 
 **Deterministic rules** (`src/musicagent/core/`, all unit-tested, no
 network/LLM):
-- Camelot compatibility: same key, ±1 on the wheel, or the relative
-  major/minor.
+- Camelot compatibility: the full harmonic-mixing transition table, and it
+  is *directed* -- `8A -> 9A` is an "energy boost +", `9A -> 8A` an "energy
+  drop -". Perfect matches (same key, relative major/minor `8A <-> 7B`),
+  boosts `+`/`++`/`+++`, drops `-`/`--`/`---` and mood changes each carry an
+  affinity (how smooth) and an energy push (-3..+3). Anything not in the
+  table gets no edge. See spec.md section 3 for the table.
 - BPM window: ±6% (configurable constant).
-- Edge score: weighted sum of key compatibility, BPM distance, and the
+- Edge score: weighted sum of key affinity, BPM distance, and the
   energy delta *between the two adjacent tracks*.
 - Path search: greedy beam search over the transition graph, scoring each
-  candidate track by its edge score plus a separate term for how close its
-  energy is to the target curve for the requested shape (`build`,
-  `peak_end`, `wave`) at that position -- two different energy comparisons
+  candidate track by its edge score plus two shape terms for the requested
+  curve (`build`, `peak_end`, `wave`): how close its energy is to the target
+  at that position, and whether the key change's push points the way the
+  curve moves there (boost while rising, drop while falling). Three
+  different energy comparisons
   doing two different jobs (local smoothness vs. overall arc).
 
 **Enrichment cascade** (`src/musicagent/enrichment.py`): per track, Deezer
@@ -226,7 +232,7 @@ Massano - The Feeling  ->  Kolsch - Grey
     0.39 for a deeper moment.
 
 Overmono - So U Kno  ->  Rufus Du Sol - Innerbloom
-    6A to 6B — same position, relative major — with the BPM settling to 122
+    6A to 6B — an energy boost + on the wheel — with the BPM settling to 122
     and energy down to 0.45 for an atmospheric close.
 ```
 

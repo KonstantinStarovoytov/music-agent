@@ -1,4 +1,4 @@
-from musicagent.core.camelot import key_affinity
+from musicagent.core.camelot import transition
 from musicagent.models import Edge, Track
 
 BPM_TOLERANCE = 0.06
@@ -9,7 +9,7 @@ def bpm_ok(a: float, b: float) -> bool:
 
 
 def edge_score(a: Track, b: Track) -> float:
-    key = key_affinity(a.camelot, b.camelot)
+    key = transition(a.camelot, b.camelot).affinity
     if key == 0.0 or not bpm_ok(a.bpm, b.bpm):
         return 0.0
     bpm_closeness = 1.0 - (abs(a.bpm - b.bpm) / max(a.bpm, b.bpm)) / BPM_TOLERANCE
@@ -18,9 +18,16 @@ def edge_score(a: Track, b: Track) -> float:
 
 
 def build_edges(tracks: list[Track]) -> list[Edge]:
-    return [
-        Edge(a=i, b=j, score=s)
-        for i, a in enumerate(tracks)
-        for j, b in enumerate(tracks)
-        if i != j and (s := edge_score(a, b)) > 0.0
-    ]
+    edges = []
+    for i, a in enumerate(tracks):
+        for j, b in enumerate(tracks):
+            if i == j:
+                continue
+            score = edge_score(a, b)
+            if score <= 0.0:
+                continue
+            t = transition(a.camelot, b.camelot)
+            edges.append(
+                Edge(a=i, b=j, score=score, energy_delta=t.energy_delta, label=t.label)
+            )
+    return edges

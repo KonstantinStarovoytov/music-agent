@@ -4,6 +4,12 @@ from musicagent.core.scoring import build_edges
 from musicagent.models import Edge, SetPath, Track
 
 ENERGY_WEIGHT = 0.4
+# Weight of the harmonic push term: does the key change (boost/drop from the
+# transition table) point the way the target curve moves at this step?
+KEY_SHIFT_WEIGHT = 0.2
+# Target-curve moves smaller than this per step count as a plateau, where any
+# boost/drop is mildly out of place.
+PLATEAU_EPS = 0.02
 
 
 def target_energy(shape: str, pos: int, total: int) -> float:
@@ -16,6 +22,20 @@ def target_energy(shape: str, pos: int, total: int) -> float:
     if shape == "wave":
         return 0.6 + 0.3 * math.sin(2 * math.pi * frac)
     raise ValueError(f"unknown shape: {shape!r}")
+
+
+def shift_fit(energy_delta: int, shape: str, pos: int, total: int) -> float:
+    """How well a key change's harmonic push (-3..+3) matches the direction the
+    target curve moves into position `pos`. +1 when fully aligned (a +++
+    boost on a rising step), -1 when fully opposed, 0 for a neutral
+    transition; on a plateau any push is a small negative."""
+    if pos <= 0 or energy_delta == 0:
+        return 0.0
+    want = target_energy(shape, pos, total) - target_energy(shape, pos - 1, total)
+    strength = energy_delta / 3.0
+    if abs(want) < PLATEAU_EPS:
+        return -0.5 * abs(strength)
+    return strength if want > 0 else -strength
 
 
 def find_path(
@@ -33,8 +53,10 @@ def find_path(
         edges = build_edges(tracks)
 
     adj: dict[int, dict[int, float]] = {}
+    delta: dict[tuple[int, int], int] = {}
     for e in edges:
         adj.setdefault(e.a, {})[e.b] = e.score
+        delta[(e.a, e.b)] = e.energy_delta
 
     def fit(i: int, pos: int) -> float:
         # Known MVP limitation: normalizes against the input pool size (n), not
@@ -51,7 +73,13 @@ def find_path(
             for j, s in adj.get(path[-1], {}).items():
                 if j in used:
                     continue
-                nscore = score + s + ENERGY_WEIGHT * fit(j, len(path))
+                pos = len(path)
+                nscore = (
+                    score
+                    + s
+                    + ENERGY_WEIGHT * fit(j, pos)
+                    + KEY_SHIFT_WEIGHT * shift_fit(delta[(path[-1], j)], shape, pos, n)
+                )
                 nxt.append((nscore, path + [j], used | {j}))
         if nxt:
             # Update best from the pre-truncation candidate list: a longest-so-far

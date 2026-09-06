@@ -48,6 +48,10 @@ class Edge(BaseModel):
     a: int
     b: int
     score: float
+    # Harmonic push of the key change a -> b (-3..+3) and the transition
+    # table's name for it; see core/camelot.py::transition.
+    energy_delta: int = 0
+    label: str = ""
 
 
 class TransitionGraph(BaseModel):

@@ -2,6 +2,7 @@ import os
 
 from pydantic import BaseModel
 
+from musicagent.core.camelot import transition
 from musicagent.models import (
     SetPath,
     SetRequest,
@@ -16,7 +17,7 @@ def get_llm():
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
-        model=os.environ.get("MUSICAGENT_MODEL", "gpt-4o-mini"), temperature=0
+        model=os.environ.get("MUSICAGENT_MODEL", "gpt-5.6-luna"), temperature=0
     )
 
 
@@ -39,7 +40,10 @@ User request:
 
 EXPLAIN_PROMPT = """You are a DJ explaining a set. For each consecutive pair of tracks
 below, write one short explanation of why the transition works (key relationship on the
-Camelot wheel, BPM closeness, energy movement). Then a 1-2 sentence summary of the set arc.
+Camelot wheel, BPM closeness, energy movement). Each track after the first is annotated with
+the harmonic-mixing name of the key change that leads into it (e.g. "perfect match",
+"energy boost ++", "energy drop -", "mood change") -- use that as the musical intent of the
+transition rather than re-deriving it. Then a 1-2 sentence summary of the set arc.
 Some tracks show a key confidence (0-1, from algorithmic key detection); when it's low
 (below ~0.5), hedge the key claim in your explanation instead of stating it flatly.
 If a list of unresolved or left-out tracks appears below, briefly mention those tracks in
@@ -121,9 +125,14 @@ def explain_set(
             if t.key_confidence is not None
             else ""
         )
+        via = ""
+        if i > 0:
+            label = transition(path.tracks[i - 1].camelot, t.camelot).label
+            if label != "none":
+                via = f" <- {label}"
         return (
             f"{i + 1}. {t.ref.artist} - {t.ref.title} "
-            f"[{t.camelot}, {t.bpm:.0f} BPM, energy {t.energy:.2f}{conf}]"
+            f"[{t.camelot}, {t.bpm:.0f} BPM, energy {t.energy:.2f}{conf}]{via}"
         )
 
     lines = "\n".join(_track_line(i, t) for i, t in enumerate(path.tracks))
